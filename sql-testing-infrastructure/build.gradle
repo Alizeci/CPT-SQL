@@ -1,0 +1,32 @@
+plugins {
+    id 'org.springframework.boot'
+    id 'io.spring.dependency-management'
+}
+
+// Este módulo es una librería, no una aplicación ejecutable.
+// Se deshabilita el bootJar y se habilita el jar estándar.
+bootJar { enabled = false }
+jar     { enabled = true  }
+
+dependencies {
+    implementation project(':sql-testing-domain')
+
+    // Spring Boot: contexto, beans, JMX
+    implementation 'org.springframework.boot:spring-boot-starter'
+    // Spring Web: @RestController para el endpoint de CaptureToggle
+    implementation 'org.springframework.boot:spring-boot-starter-web'
+
+    // Jackson: deserialización de queries.json generado en Fase 1
+    implementation 'com.fasterxml.jackson.core:jackson-databind'
+
+    // Lombok
+    compileOnly      'org.projectlombok:lombok:1.18.32'
+    annotationProcessor 'org.projectlombok:lombok:1.18.32'
+
+    // JDBC API (scope provided — la BD la aporta la app consumidora)
+    compileOnly 'jakarta.annotation:jakarta.annotation-api:2.1.1'
+
+    testImplementation 'org.junit.jupiter:junit-jupiter:5.10.2'
+    testRuntimeOnly    'org.junit.platform:junit-platform-launcher:1.10.2'
+    testImplementation 'org.springframework.boot:spring-boot-starter-test'
+}

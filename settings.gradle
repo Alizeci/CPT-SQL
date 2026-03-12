@@ -1,0 +1,4 @@
+rootProject.name = 'sql-load-testing-system'
+include 'sql-testing-domain'
+include 'sql-testing-processor'
+include 'sql-testing-infrastructure'

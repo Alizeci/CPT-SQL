@@ -1,0 +1,3 @@
+dependencies {
+    // ya no depende de domain
+}
