@@ -1,0 +1,39 @@
+{
+  "generatedAt": "2026-03-12T03:27:56.689202Z",
+  "totalQueries": 3,
+  "queries": [
+    {
+      "queryId": "getUserOrders",
+      "className": "escuelaing.edu.co.domain.sample.OrderRepository",
+      "methodName": "getUserOrders",
+      "queryDescription": "Órdenes activas de un usuario",
+      "hasReq": true,
+      "maxResponseTimeMs": 200,
+      "priority": "HIGH",
+      "reqDescription": "Crítica del checkout",
+      "allowPlanChange": false
+    },
+    {
+      "queryId": "insertOrder",
+      "className": "escuelaing.edu.co.domain.sample.OrderRepository",
+      "methodName": "insertOrder",
+      "queryDescription": "Inserta una nueva orden",
+      "hasReq": true,
+      "maxResponseTimeMs": 500,
+      "priority": "MEDIUM",
+      "reqDescription": "Default del repositorio de órdenes",
+      "allowPlanChange": true
+    },
+    {
+      "queryId": "getOrderHistory",
+      "className": "escuelaing.edu.co.domain.sample.OrderRepository",
+      "methodName": "getOrderHistory",
+      "queryDescription": "Historial completo de órdenes",
+      "hasReq": true,
+      "maxResponseTimeMs": 500,
+      "priority": "MEDIUM",
+      "reqDescription": "Default del repositorio de órdenes",
+      "allowPlanChange": true
+    }
+  ]
+}
