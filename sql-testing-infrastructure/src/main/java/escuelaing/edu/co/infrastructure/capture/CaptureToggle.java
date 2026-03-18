@@ -1,4 +1,4 @@
-package escuelaing.edu.co.infrastructure;
+package escuelaing.edu.co.infrastructure.capture;
 
 import org.springframework.jmx.export.annotation.ManagedAttribute;
 import org.springframework.jmx.export.annotation.ManagedOperation;

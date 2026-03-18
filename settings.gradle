@@ -1,4 +1,5 @@
-rootProject.name = 'sql-load-testing-system'
+rootProject.name = 'CPT-SQL'
 include 'sql-testing-domain'
-include 'sql-testing-processor'
+include 'sql-testing-annotations'
 include 'sql-testing-infrastructure'
+include 'sql-testing-demo'

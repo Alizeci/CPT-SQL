@@ -1,4 +1,4 @@
-package escuelaing.edu.co.infrastructure;
+package escuelaing.edu.co.infrastructure.capture;
 
 import escuelaing.edu.co.domain.model.TransactionRecord;
 import org.springframework.stereotype.Component;
@@ -98,7 +98,6 @@ public class JdbcWrapper {
         @Override
         public Object invoke(Object proxy, Method method, Object[] args) throws Throwable {
             if (PREPARE_METHODS.contains(method.getName())) {
-                // Capturamos el SQL en el momento de preparación
                 String sql = (args != null && args.length > 0 && args[0] instanceof String)
                         ? (String) args[0]
                         : "<unknown>";
@@ -163,7 +162,6 @@ public class JdbcWrapper {
         );
     }
 
-    /** Invoca un método en el delegado y desenvuelve InvocationTargetException. */
     private static Object invokeDelegate(Object target, Method method, Object[] args) throws Throwable {
         try {
             return method.invoke(target, args);

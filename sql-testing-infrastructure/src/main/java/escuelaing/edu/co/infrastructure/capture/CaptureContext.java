@@ -1,4 +1,4 @@
-package escuelaing.edu.co.infrastructure;
+package escuelaing.edu.co.infrastructure.capture;
 
 /**
  * Transporta el {@code queryId} activo al hilo de ejecución actual mediante

@@ -1,4 +1,4 @@
-package escuelaing.edu.co.infrastructure;
+package escuelaing.edu.co.infrastructure.analysis;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -17,7 +17,7 @@ import java.util.logging.Logger;
  * en la Fase 1 y construye un mapa {@code queryId → QueryEntry} en memoria.
  *
  * <p>Este mapa es el puente entre la Fase 1 (instrumentación estática) y la
- * Fase 2 (captura dinámica): permite que {@link SamplingFilter} consulte las
+ * Fase 2 (captura dinámica): permite que el {@code SamplingFilter} consulte las
  * reglas de negocio declaradas en {@code @Req} sin volver a parsear JSON en
  * cada ejecución de consulta.</p>
  *

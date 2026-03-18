@@ -1,4 +1,4 @@
-package escuelaing.edu.co.infrastructure;
+package escuelaing.edu.co.infrastructure.analysis;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.SerializationFeature;
@@ -20,12 +20,12 @@ import java.util.logging.Logger;
  * <h3>Línea base</h3>
  * <p>La línea base es el conjunto de métricas ({@link BenchmarkResult.QueryResult})
  * de la última ejecución aprobada, persistida en {@code baseline.json} en la
- * raíz del proyecto.  El {@link DegradationDetector} la usa para detectar
+ * raíz del proyecto. El {@link DegradationDetector} la usa para detectar
  * regresiones de tipo {@code BASELINE_EXCEEDED} y {@code PLAN_CHANGED}.</p>
  *
  * <h3>Versionado</h3>
  * <p>Cada actualización de la línea base escribe en {@code baseline.json}
- * sobreescribiendo el anterior.  El historial queda en el repositorio git,
+ * sobreescribiendo el anterior. El historial queda en el repositorio git,
  * de modo que cualquier versión anterior puede recuperarse con
  * {@code git show HEAD~n:baseline.json}.</p>
  *
@@ -56,7 +56,7 @@ public class BaselineManager {
 
     /**
      * Lee la línea base almacenada y retorna un mapa {@code queryId →
-     * QueryResult}.  Devuelve un mapa vacío si {@code baseline.json} no existe
+     * QueryResult}. Devuelve un mapa vacío si {@code baseline.json} no existe
      * aún (primera ejecución).
      *
      * @return mapa inmutable con la línea base actual
@@ -86,10 +86,10 @@ public class BaselineManager {
      */
     public void save(BenchmarkResult result) {
         BaselineFile baseline = new BaselineFile();
-        baseline.commitSha = result.getCommitSha();
+        baseline.commitSha   = result.getCommitSha();
         baseline.profileName = result.getProfileName();
-        baseline.savedAt = result.getExecutedAt().toString();
-        baseline.queries = new HashMap<>(result.getQueries());
+        baseline.savedAt     = result.getExecutedAt().toString();
+        baseline.queries     = new HashMap<>(result.getQueries());
 
         try {
             mapper.writerWithDefaultPrettyPrinter().writeValue(new File(baselinePath), baseline);

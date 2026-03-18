@@ -1,4 +1,4 @@
-package escuelaing.edu.co.infrastructure;
+package escuelaing.edu.co.infrastructure.capture;
 
 import escuelaing.edu.co.domain.model.LoadProfile;
 import escuelaing.edu.co.domain.model.TransactionRecord;
@@ -65,7 +65,6 @@ public class LoadProfileBuilder {
                     .build();
         }
 
-        // Ventana temporal global
         Instant windowStart = records.stream()
                 .map(TransactionRecord::getTimestamp)
                 .min(Instant::compareTo)
@@ -75,11 +74,9 @@ public class LoadProfileBuilder {
                 .max(Instant::compareTo)
                 .orElse(Instant.now());
 
-        // Duración en minutos (mínimo 1 ms para evitar división por cero)
         long windowMs     = Math.max(windowEnd.toEpochMilli() - windowStart.toEpochMilli(), 1L);
         double windowMins = windowMs / 60_000.0;
 
-        // Agrupar por queryId
         Map<String, List<TransactionRecord>> byQuery = records.stream()
                 .collect(Collectors.groupingBy(TransactionRecord::getQueryId));
 
@@ -132,12 +129,7 @@ public class LoadProfileBuilder {
 
     /**
      * Calcula el percentil {@code p} sobre una lista de latencias ya ordenada.
-     * Usa el método <i>nearest rank</i> (el mismo que utilizan herramientas
-     * como HdrHistogram y JMH para reportar percentiles).
-     *
-     * @param sorted lista ordenada de latencias en milisegundos
-     * @param p      percentil deseado (0–100)
-     * @return valor del percentil en milisegundos
+     * Usa el método <i>nearest rank</i>.
      */
     private double percentile(List<Long> sorted, double p) {
         if (sorted.isEmpty()) return 0.0;
