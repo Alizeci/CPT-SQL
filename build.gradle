@@ -6,7 +6,7 @@ plugins {
 
 group = 'escuelaing.edu.co'
 version = '0.0.1-SNAPSHOT'
-description = 'System for continuous load testing of SQL queries during the software development lifecycle.'
+description = 'CPT-SQL: Continuous Performance Testing for SQL queries across the software development lifecycle.'
 
 subprojects {
     apply plugin: 'java'
