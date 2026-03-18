@@ -1,4 +1,4 @@
-package escuelaing.edu.co.infrastructure;
+package escuelaing.edu.co.infrastructure.analysis;
 
 import escuelaing.edu.co.domain.model.BenchmarkResult;
 import escuelaing.edu.co.domain.model.DegradationReport;
@@ -21,7 +21,7 @@ import java.util.logging.Logger;
  *       {@code allowPlanChange} declarados en el código fuente y leídos desde
  *       {@code queries.json} vía {@link QueryRegistryLoader}.</li>
  *   <li><b>Línea base histórica:</b> p95 guardado en {@code baseline.json} por
- *       el {@link BaselineManager}.  Una regresión se marca cuando el p95
+ *       el {@link BaselineManager}. Una regresión se marca cuando el p95
  *       actual supera la línea base en más de {@code baselineTolerancePct} %
  *       (10 % por defecto).</li>
  * </ol>
@@ -38,19 +38,9 @@ public class DegradationDetector {
 
     private static final Logger LOG = Logger.getLogger(DegradationDetector.class.getName());
 
-    /**
-     * Margen porcentual aceptable sobre la línea base antes de reportar
-     * {@link DegradationReport.RegressionType#BASELINE_EXCEEDED}.
-     * Por defecto 10 % (0.10).
-     */
     @Value("${loadtest.detector.baselineTolerancePct:0.10}")
     private double baselineTolerancePct;
 
-    /**
-     * Margen porcentual aceptable sobre el costo del plan de la línea base
-     * antes de reportar {@link DegradationReport.RegressionType#PLAN_CHANGED}.
-     * Por defecto 20 % (0.20).
-     */
     @Value("${loadtest.detector.planCostTolerancePct:0.20}")
     private double planCostTolerancePct;
 
@@ -82,7 +72,7 @@ public class DegradationDetector {
         for (Map.Entry<String, BenchmarkResult.QueryResult> entry
                 : result.getQueries().entrySet()) {
 
-            String queryId   = entry.getKey();
+            String queryId  = entry.getKey();
             BenchmarkResult.QueryResult current = entry.getValue();
             QueryEntry req  = registry.get(queryId);
 
@@ -109,9 +99,6 @@ public class DegradationDetector {
     // Reglas de evaluación
     // -------------------------------------------------------------------------
 
-    /**
-     * Regla 1 — P95 medido supera el {@code maxResponseTimeMs} de {@code @Req}.
-     */
     private void checkReqThreshold(String queryId,
                                     BenchmarkResult.QueryResult current,
                                     QueryEntry req,
@@ -131,10 +118,6 @@ public class DegradationDetector {
         }
     }
 
-    /**
-     * Regla 2 — El costo del plan cambió significativamente y la consulta
-     * declara {@code allowPlanChange = false}.
-     */
     private void checkPlanChange(String queryId,
                                   BenchmarkResult.QueryResult current,
                                   BenchmarkResult.QueryResult baselineResult,
@@ -143,8 +126,8 @@ public class DegradationDetector {
         if (req == null || req.isAllowPlanChange()) return;
         if (baselineResult == null || baselineResult.getPlanCost() == 0.0) return;
 
-        double baseCost = baselineResult.getPlanCost();
-        double tolerance = baseCost * (1 + planCostTolerancePct);
+        double baseCost   = baselineResult.getPlanCost();
+        double tolerance  = baseCost * (1 + planCostTolerancePct);
         if (current.getPlanCost() > tolerance) {
             out.add(DegradationReport.Regression.builder()
                     .queryId(queryId)
@@ -160,17 +143,14 @@ public class DegradationDetector {
         }
     }
 
-    /**
-     * Regla 3 — El p95 actual supera el p95 de la línea base más la tolerancia.
-     */
     private void checkBaselineExceeded(String queryId,
                                         BenchmarkResult.QueryResult current,
                                         BenchmarkResult.QueryResult baselineResult,
                                         List<DegradationReport.Regression> out) {
         if (baselineResult == null || baselineResult.getP95Ms() == 0.0) return;
 
-        double baseP95    = baselineResult.getP95Ms();
-        double threshold  = baseP95 * (1 + baselineTolerancePct);
+        double baseP95   = baselineResult.getP95Ms();
+        double threshold = baseP95 * (1 + baselineTolerancePct);
         if (current.getP95Ms() > threshold) {
             out.add(DegradationReport.Regression.builder()
                     .queryId(queryId)

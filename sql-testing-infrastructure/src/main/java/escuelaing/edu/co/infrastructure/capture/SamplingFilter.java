@@ -1,6 +1,7 @@
-package escuelaing.edu.co.infrastructure;
+package escuelaing.edu.co.infrastructure.capture;
 
 import escuelaing.edu.co.domain.model.QueryEntry;
+import escuelaing.edu.co.infrastructure.analysis.QueryRegistryLoader;
 import org.springframework.stereotype.Component;
 
 import java.util.Random;

@@ -1,4 +1,4 @@
-package escuelaing.edu.co.infrastructure;
+package escuelaing.edu.co.infrastructure.capture;
 
 import escuelaing.edu.co.domain.model.TransactionRecord;
 import jakarta.annotation.PostConstruct;
@@ -66,7 +66,6 @@ public class MetricsBuffer {
         if (flusherThread != null) {
             flusherThread.interrupt();
         }
-        // Último flush antes de apagar
         drainBatch();
         LOG.info("[MetricsBuffer] Detenido. Total registros en flushed: " + flushed.size());
     }
