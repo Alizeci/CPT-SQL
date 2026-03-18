@@ -1,0 +1,61 @@
+{
+  "generatedAt": "2026-03-18T04:39:49.752887Z",
+  "totalQueries": 5,
+  "queries": [
+    {
+      "queryId": "updateInventory",
+      "className": "escuelaing.edu.co.domain.sample.ProductRepository",
+      "methodName": "updateInventory",
+      "queryDescription": "Descuenta unidades del stock (venta confirmada)",
+      "hasReq": true,
+      "maxResponseTimeMs": 100,
+      "priority": "HIGH",
+      "reqDescription": "SLA: 100 ms p95. Escritura concurrente crítica — plan change prohibido",
+      "allowPlanChange": false
+    },
+    {
+      "queryId": "searchProductsByCategory",
+      "className": "escuelaing.edu.co.domain.sample.ProductRepository",
+      "methodName": "searchProductsByCategory",
+      "queryDescription": "Busca productos activos por categoría con paginación",
+      "hasReq": true,
+      "maxResponseTimeMs": 100,
+      "priority": "HIGH",
+      "reqDescription": "SLA: 100 ms p95. Plan change prohibido — índice crítico para hot spots",
+      "allowPlanChange": false
+    },
+    {
+      "queryId": "checkInventory",
+      "className": "escuelaing.edu.co.domain.sample.ProductRepository",
+      "methodName": "checkInventory",
+      "queryDescription": "Verifica el stock disponible de un producto",
+      "hasReq": true,
+      "maxResponseTimeMs": 30,
+      "priority": "HIGH",
+      "reqDescription": "SLA: 30 ms p95. Lectura crítica antes del checkout — plan change prohibido",
+      "allowPlanChange": false
+    },
+    {
+      "queryId": "getProductDetail",
+      "className": "escuelaing.edu.co.domain.sample.ProductRepository",
+      "methodName": "getProductDetail",
+      "queryDescription": "Obtiene el detalle completo de un producto por ID",
+      "hasReq": true,
+      "maxResponseTimeMs": 50,
+      "priority": "HIGH",
+      "reqDescription": "SLA: 50 ms p95. Acceso por PK — cualquier plan change es una regresión",
+      "allowPlanChange": false
+    },
+    {
+      "queryId": "createOrder",
+      "className": "escuelaing.edu.co.domain.sample.ProductRepository",
+      "methodName": "createOrder",
+      "queryDescription": "Crea una orden y sus líneas de detalle (multi-tabla)",
+      "hasReq": true,
+      "maxResponseTimeMs": 200,
+      "priority": "HIGH",
+      "reqDescription": "SLA: 200 ms p95. Plan change permitido — write multi-tabla",
+      "allowPlanChange": true
+    }
+  ]
+}

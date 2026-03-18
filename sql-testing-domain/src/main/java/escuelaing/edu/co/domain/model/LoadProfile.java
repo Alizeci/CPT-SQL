@@ -66,5 +66,13 @@ public class LoadProfile {
          * del período de observación.
          */
         private double callsPerMinute;
+
+        /**
+         * Un ejemplo del SQL real capturado en producción para este queryId.
+         * Usado por {@code QueryExecutor} en Fase 3 para ejecutar el query
+         * real del usuario en lugar de un fallback sintético.
+         * Puede ser null si no se capturó SQL concreto.
+         */
+        private String capturedSql;
     }
 }
