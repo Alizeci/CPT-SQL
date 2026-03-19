@@ -10,6 +10,7 @@ import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Random;
 import java.util.logging.Logger;
@@ -68,7 +69,7 @@ public class SyntheticDataGenerator {
         List<String> tables = discoverUserTables(conn);
 
         if (isEcommerceSchema(tables)) {
-            populateEcommerce(conn);
+            populateEcommerce(conn, profile);
         } else {
             populateGeneric(conn, tables);
         }
@@ -109,12 +110,46 @@ public class SyntheticDataGenerator {
     // Población específica: demo e-commerce
     // -------------------------------------------------------------------------
 
-    private void populateEcommerce(Connection conn) throws SQLException {
+    private void populateEcommerce(Connection conn, LoadProfile profile) throws SQLException {
         LOG.info("[SyntheticData] Poblando schema e-commerce...");
-        insertProducts(conn);
-        insertCustomers(conn);
-        insertOrders(conn);
+        // Calibrar filas por tabla según callsPerMinute del perfil de producción.
+        // products: accedida por searchProductsByCategory, getProductDetail,
+        //           checkInventory, updateInventory (~90 % del tráfico)
+        // orders:   accedida por createOrder (~10 % normal, 60 % en pico)
+        int productRows  = computeTableRows(profile,
+                "searchProductsByCategory", "getProductDetail",
+                "checkInventory", "updateInventory");
+        int orderRows    = computeTableRows(profile, "createOrder");
+        int customerRows = Math.max(productRows / 5, 100);
+
+        insertProducts(conn, productRows);
+        insertCustomers(conn, customerRows);
+        insertOrders(conn, orderRows);
         LOG.info("[SyntheticData] E-commerce poblado.");
+    }
+
+    /**
+     * Calcula el número de filas a generar para las tablas accedidas por
+     * los {@code queryIds} indicados, escalando {@code rowsPerTable}
+     * proporcionalmente a la fracción de tráfico ({@code callsPerMinute})
+     * que esos queries representan sobre el total del perfil de producción.
+     *
+     * <p>Si el perfil está vacío o no contiene los queryIds indicados,
+     * devuelve {@code rowsPerTable} como fallback.</p>
+     */
+    private int computeTableRows(LoadProfile profile, String... queryIds) {
+        if (profile == null || profile.getQueries().isEmpty()) return rowsPerTable;
+        double totalCpm = profile.getQueries().values().stream()
+                .mapToDouble(LoadProfile.QueryStats::getCallsPerMinute).sum();
+        double tableCpm = Arrays.stream(queryIds)
+                .mapToDouble(id -> {
+                    LoadProfile.QueryStats s = profile.getQueries().get(id);
+                    return s != null ? s.getCallsPerMinute() : 0.0;
+                }).sum();
+        if (totalCpm == 0 || tableCpm == 0) return rowsPerTable;
+        // ratio ∈ (0, 1]: fracción del tráfico que va a esta tabla.
+        // ×5 para que una tabla con el 20 % del tráfico genere ~rowsPerTable filas.
+        return (int) Math.max(100, Math.round(rowsPerTable * (tableCpm / totalCpm) * 5));
     }
 
     private static final String[] CATEGORIES = {
@@ -122,14 +157,13 @@ public class SyntheticDataGenerator {
         "home", "beauty", "toys", "food"
     };
 
-    private void insertProducts(Connection conn) throws SQLException {
+    private void insertProducts(Connection conn, int count) throws SQLException {
         String sql = """
                 INSERT INTO products (name, category, price, stock_quantity, rating, active)
                 VALUES (?, ?, ?, ?, ?, TRUE)
                 ON CONFLICT DO NOTHING
                 """;
         try (PreparedStatement ps = conn.prepareStatement(sql)) {
-            int count = Math.max(rowsPerTable, 500);
             for (int i = 1; i <= count; i++) {
                 String cat    = CATEGORIES[rng.nextInt(CATEGORIES.length)];
                 double price  = clamp(gaussianNoise(80.0, 60.0), 1.0, 999.99);
@@ -150,14 +184,13 @@ public class SyntheticDataGenerator {
 
     private static final String[] TIERS = {"STANDARD", "STANDARD", "STANDARD", "PREMIUM", "VIP"};
 
-    private void insertCustomers(Connection conn) throws SQLException {
+    private void insertCustomers(Connection conn, int count) throws SQLException {
         String sql = """
                 INSERT INTO customers (name, email, tier)
                 VALUES (?, ?, ?)
                 ON CONFLICT DO NOTHING
                 """;
         try (PreparedStatement ps = conn.prepareStatement(sql)) {
-            int count = Math.max(rowsPerTable / 3, 200);
             for (int i = 1; i <= count; i++) {
                 ps.setString(1, "Customer " + i);
                 ps.setString(2, "customer" + i + "@demo.test");
@@ -169,7 +202,7 @@ public class SyntheticDataGenerator {
         }
     }
 
-    private void insertOrders(Connection conn) throws SQLException {
+    private void insertOrders(Connection conn, int count) throws SQLException {
         List<Integer> customerIds = fetchIds(conn, "customers");
         List<Integer> productIds  = fetchIds(conn, "products");
         if (customerIds.isEmpty() || productIds.isEmpty()) return;
@@ -190,7 +223,6 @@ public class SyntheticDataGenerator {
                 ON CONFLICT DO NOTHING
                 """;
 
-        int count = Math.max(rowsPerTable / 2, 300);
         for (int i = 0; i < count; i++) {
             int customerId = customerIds.get(rng.nextInt(customerIds.size()));
             int numItems   = 1 + rng.nextInt(4);
