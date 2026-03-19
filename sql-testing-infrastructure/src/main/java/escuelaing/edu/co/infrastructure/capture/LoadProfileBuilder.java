@@ -114,6 +114,12 @@ public class LoadProfileBuilder {
         long   min    = latencies.get(0);
         long   max    = latencies.get(latencies.size() - 1);
 
+        String capturedSql = samples.stream()
+                .map(TransactionRecord::getSql)
+                .filter(s -> s != null && !s.isBlank())
+                .findFirst()
+                .orElse(null);
+
         return LoadProfile.QueryStats.builder()
                 .queryId(queryId)
                 .sampleCount(n)
@@ -124,6 +130,7 @@ public class LoadProfileBuilder {
                 .callsPerMinute(cpm)
                 .minMs(min)
                 .maxMs(max)
+                .capturedSql(capturedSql)
                 .build();
     }
 

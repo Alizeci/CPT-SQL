@@ -2,8 +2,10 @@ package escuelaing.edu.co.infrastructure.benchmark;
 
 import escuelaing.edu.co.domain.model.BenchmarkResult;
 import escuelaing.edu.co.domain.model.LoadProfile;
+import escuelaing.edu.co.domain.model.QueryEntry;
 import escuelaing.edu.co.domain.model.TestProfile;
 import escuelaing.edu.co.domain.model.TransactionRecord;
+import escuelaing.edu.co.infrastructure.analysis.QueryRegistryLoader;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
@@ -73,13 +75,16 @@ public class BenchmarkRunner {
     private final MirrorDatabaseProvisioner provisioner;
     private final SyntheticDataGenerator    dataGenerator;
     private final QueryExecutor             queryExecutor;
+    private final QueryRegistryLoader       queryRegistry;
 
     public BenchmarkRunner(MirrorDatabaseProvisioner provisioner,
                            SyntheticDataGenerator dataGenerator,
-                           QueryExecutor queryExecutor) {
+                           QueryExecutor queryExecutor,
+                           QueryRegistryLoader queryRegistry) {
         this.provisioner   = provisioner;
         this.dataGenerator = dataGenerator;
         this.queryExecutor = queryExecutor;
+        this.queryRegistry = queryRegistry;
     }
 
     // -------------------------------------------------------------------------
@@ -305,17 +310,21 @@ public class BenchmarkRunner {
             double avgPlan = n > 0 ? totalPlanCost / n : 0.0;
 
             // SLA compliance rate — métrica M de Dyn-YCSB
+            // El umbral es maxResponseTimeMs declarado en @Req (Fase 1)
             LoadProfile.QueryStats stats = profile.getQueries().get(qid);
-            long slaThresholdMs = stats != null ? (long) stats.getP95Ms() * 2 : Long.MAX_VALUE;
-            long within         = latencies.stream().filter(l -> l <= slaThresholdMs).count();
-            double compliance   = n > 0 ? (within * 100.0 / n) : 100.0;
+            QueryEntry req = queryRegistry.get(qid);
+            long slaThresholdMs = (req != null && req.isHasReq())
+                    ? req.getMaxResponseTimeMs()
+                    : Long.MAX_VALUE;
+            long within       = latencies.stream().filter(l -> l <= slaThresholdMs).count();
+            double compliance = n > 0 ? (within * 100.0 / n) : 100.0;
 
             BenchmarkResult.Verdict verdict = BenchmarkResult.Verdict.PASS;
             String failReason = null;
-            if (stats != null && p95 > stats.getP95Ms() * 2) {
+            if (req != null && req.isHasReq() && p95 > req.getMaxResponseTimeMs()) {
                 verdict    = BenchmarkResult.Verdict.FAIL;
-                failReason = String.format("p95=%.0fms supera 2× el p95 de producción (%.0fms)",
-                        p95, stats.getP95Ms());
+                failReason = String.format("p95=%.0fms supera maxResponseTimeMs=%dms de @Req",
+                        p95, req.getMaxResponseTimeMs());
                 anyFail = true;
             }
 
