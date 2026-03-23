@@ -1,6 +1,7 @@
 package escuelaing.edu.co.infrastructure.benchmark;
 
 import escuelaing.edu.co.domain.model.LoadProfile;
+import escuelaing.edu.co.domain.model.TestProfile;
 import escuelaing.edu.co.domain.model.TransactionRecord;
 import org.springframework.stereotype.Component;
 
@@ -43,27 +44,54 @@ public class QueryExecutor {
     // -------------------------------------------------------------------------
 
     /**
-     * Ejecuta la consulta asociada a {@code queryId} en la BD espejo y
-     * retorna el registro de ejecución con latencia y plan de ejecución.
-     *
-     * @param conn    conexión abierta a la BD espejo
-     * @param queryId identificador de la consulta (puente con Fase 1)
-     * @param stats   estadísticas del perfil de carga para esta consulta
-     * @param sql     SQL capturado en Fase 2 (puede ser null)
-     * @return registro de ejecución con latencia medida y plan capturado
+     * Ejecuta la consulta asociada a {@code queryId} en la BD espejo con
+     * distribución de acceso UNIFORM (parámetros sintéticos uniformes).
      */
     public TransactionRecord execute(Connection conn,
                                      String queryId,
                                      LoadProfile.QueryStats stats,
                                      String sql) {
+        return execute(conn, queryId, stats, sql,
+                TestProfile.AccessDistribution.UNIFORM, 1.0);
+    }
+
+    /**
+     * Ejecuta la consulta asociada a {@code queryId} en la BD espejo y
+     * retorna el registro de ejecución con latencia y plan de ejecución.
+     *
+     * <p>Los parámetros sintéticos se vinculan según la distribución de acceso
+     * indicada. Con {@link TestProfile.AccessDistribution#ZIPF} los valores
+     * se sesgan hacia los registros más populares (hot spots), replicando el
+     * comportamiento de un flash sale (BenchPress §2 "time-evolving access skew").</p>
+     *
+     * @param conn       conexión abierta a la BD espejo
+     * @param queryId    identificador de la consulta (puente con Fase 1)
+     * @param stats      estadísticas del perfil de carga para esta consulta
+     * @param sql        SQL capturado en Fase 2 (puede ser null — se omite si stats tampoco tiene)
+     * @param accessDist distribución de acceso a los datos
+     * @param zipfAlpha  parámetro α de Zipf; ignorado si la distribución es UNIFORM
+     * @return registro de ejecución con latencia medida y plan capturado
+     */
+    public TransactionRecord execute(Connection conn,
+                                     String queryId,
+                                     LoadProfile.QueryStats stats,
+                                     String sql,
+                                     TestProfile.AccessDistribution accessDist,
+                                     double zipfAlpha) {
         String resolvedSql = resolveSql(sql, stats);
+        if (resolvedSql == null) {
+            LOG.warning("[QueryExecutor] Sin SQL para " + queryId + " — ejecución omitida.");
+            return TransactionRecord.builder()
+                    .queryId(queryId).sql("").latencyMs(0).timestamp(Instant.now()).build();
+        }
+
         String plan = captureExplainPlan(conn, resolvedSql);
 
         Instant start  = Instant.now();
         long startNs   = System.nanoTime();
 
         try (PreparedStatement ps = conn.prepareStatement(resolvedSql)) {
-            bindSyntheticParameters(ps, stats);
+            bindSyntheticParameters(ps, accessDist, zipfAlpha);
             try (ResultSet rs = ps.executeQuery()) {
                 while (rs.next()) { /* consumir el cursor */ }
             }
@@ -90,19 +118,54 @@ public class QueryExecutor {
         if (sql != null && !sql.isBlank()) {
             return sql;
         }
+        if (stats != null && stats.getCapturedSql() != null && !stats.getCapturedSql().isBlank()) {
+            return stats.getCapturedSql();
+        }
         return null;
     }
 
+    /**
+     * Vincula parámetros sintéticos al {@link PreparedStatement}.
+     *
+     * <p>Con {@link TestProfile.AccessDistribution#ZIPF} los valores se sesgan
+     * hacia los registros más populares usando un generador Zipf inverso,
+     * simulando hot spots de acceso (BenchPress §2, Dyn-YCSB Fig. 1).</p>
+     */
     private void bindSyntheticParameters(PreparedStatement ps,
-                                          LoadProfile.QueryStats stats) throws SQLException {
+                                          TestProfile.AccessDistribution dist,
+                                          double zipfAlpha) throws SQLException {
         try {
             java.sql.ParameterMetaData meta = ps.getParameterMetaData();
             for (int i = 1; i <= meta.getParameterCount(); i++) {
-                ps.setInt(i, syntheticInt(1, 1000));
+                int value = (dist == TestProfile.AccessDistribution.ZIPF)
+                        ? zipfInt(1_000, zipfAlpha)
+                        : syntheticInt(1, 1_000);
+                ps.setInt(i, value);
             }
         } catch (SQLException ignored) {
             // Algunos drivers lanzan excepción en getParameterMetaData — ignorar
         }
+    }
+
+    /**
+     * Genera un entero aleatorio sesgado según la distribución Zipf(α) en [1, n].
+     *
+     * <p>P(k) ∝ k^{-α}: los valores bajos (registros "populares") se seleccionan
+     * con mayor frecuencia. Para α=1.0 el top-20 % recibe ~80 % de los accesos.</p>
+     *
+     * <p>Implementación por transformada inversa sobre CDF normalizada (O(n) por llamada,
+     * aceptable para n=1000 en el contexto de un benchmark).</p>
+     */
+    private int zipfInt(int n, double alpha) {
+        double sum = 0;
+        for (int i = 1; i <= n; i++) sum += 1.0 / Math.pow(i, alpha);
+        double target = rng.nextDouble() * sum;
+        double cumulative = 0;
+        for (int i = 1; i <= n; i++) {
+            cumulative += 1.0 / Math.pow(i, alpha);
+            if (cumulative >= target) return i;
+        }
+        return n;
     }
 
     // -------------------------------------------------------------------------

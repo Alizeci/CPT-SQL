@@ -1,0 +1,72 @@
+name: Benchmark — Commit (light)
+
+# Corre en cada Pull Request hacia main.
+# Detecta regresiones de rendimiento antes de mergear.
+# Runner: self-hosted en EC2 t2.micro (entorno consistente y dedicado).
+on:
+  pull_request:
+    branches: [main]
+
+jobs:
+  benchmark:
+    runs-on: self-hosted
+
+    steps:
+      # ── 1. Checkout ──────────────────────────────────────────────────────────
+      - uses: actions/checkout@v4
+
+      # ── 2. Limpiar estado anterior ────────────────────────────────────────────
+      # Elimina el contenedor espejo de una ejecución previa fallida.
+      # El || true evita que el step falle si el contenedor no existe.
+      - name: Limpiar contenedor espejo anterior
+        run: docker rm -f cpt-sql-mirror || true
+
+      # ── Fase 1: compilar y generar queries.json ───────────────────────────────
+      # El annotation processor genera loadtest/queries.json con los @SqlQuery/@Req
+      # declarados en ProductRepository. Este archivo es el puente entre
+      # la instrumentación estática (Fase 1) y la captura dinámica (Fase 2).
+      - name: "Fase 1 — Compilar y generar queries.json"
+        run: ./gradlew :sql-testing-demo:compileJava
+
+      # ── Fase 2: simular tráfico y capturar LoadProfile ────────────────────────
+      # EcommerceSimulator conecta al PostgreSQL de la EC2 (ecommerce_demo),
+      # ejecuta las 5 queries durante 60 s con JdbcWrapper activo y genera
+      # load-profile.json con las métricas capturadas.
+      - name: "Fase 2 — Simular tráfico y capturar load-profile.json"
+        run: ./gradlew :sql-testing-demo:runSimulator
+        env:
+          DB_URL: jdbc:postgresql://localhost:5432/ecommerce_demo
+          DB_USER: ${{ secrets.DEMO_DB_USER }}
+          DB_PASSWORD: ${{ secrets.DEMO_DB_PASSWORD }}
+
+      # ── Build fat JAR ─────────────────────────────────────────────────────────
+      - name: Build fat JAR (BenchmarkMain)
+        run: ./gradlew :sql-testing-demo:bootJar
+
+      # ── Fases 3 + 4: benchmark y detección de regresiones ─────────────────────
+      # BenchmarkMain:
+      #   1. Lee load-profile.json (Fase 2)
+      #   2. Levanta BD espejo en Docker (MirrorDatabaseProvisioner)
+      #   3. Genera datos sintéticos (SyntheticDataGenerator — DPSDG)
+      #   4. Ejecuta benchmark con TestProfile "light" (30 s, 10 TPS, UNIFORM)
+      #   5. Compara contra baseline.json (DegradationDetector)
+      #   6. Sale con código 1 si detecta regresiones → falla el CI
+      - name: "Fases 3+4 — Benchmark y detección de regresiones"
+        run: |
+          java -jar sql-testing-demo/build/libs/sql-testing-demo-*.jar \
+            --loadtest.benchmark.testProfile=light \
+            --loadtest.mirror.schema.script=sql-testing-demo/src/main/resources/schema-ecommerce.sql
+        env:
+          GITHUB_SHA: ${{ github.sha }}
+
+      # ── Artefactos ────────────────────────────────────────────────────────────
+      # Se suben siempre (if: always()) para poder analizar fallos.
+      - name: Subir artefactos de resultado
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-commit-${{ github.sha }}
+          path: |
+            load-profile.json
+            baseline.json
+            build/results/

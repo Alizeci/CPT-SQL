@@ -136,11 +136,23 @@ public class JdbcWrapper {
             long startNano   = System.nanoTime();
             long latencyMs   = (System.nanoTime() - startNano) / 1_000_000;
 
+            // Captura de filas afectadas para operaciones de escritura
+            long rowCount = 0;
+            String mn = method.getName();
+            if ("executeUpdate".equals(mn) && result instanceof Integer) {
+                rowCount = (Integer) result;
+            } else if ("executeLargeUpdate".equals(mn) && result instanceof Long) {
+                rowCount = (Long) result;
+            } else if ("execute".equals(mn) && result instanceof Boolean && !(Boolean) result) {
+                try { rowCount = delegate.getUpdateCount(); } catch (Exception ignored) {}
+            }
+
             if (queryId != null && samplingFilter.shouldRecord(queryId, latencyMs)) {
                 TransactionRecord record = TransactionRecord.builder()
                         .queryId(queryId)
                         .sql(sql)
                         .latencyMs(latencyMs)
+                        .rowCount(rowCount)
                         .timestamp(start)
                         .build();
                 metricsBuffer.record(record);
