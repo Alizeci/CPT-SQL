@@ -348,6 +348,9 @@ public class BenchmarkRunner {
                     : Long.MAX_VALUE;
             long within       = latencies.stream().filter(l -> l <= slaThresholdMs).count();
             double compliance = n > 0 ? (within * 100.0 / n) : 100.0;
+            double slaRiskPct = (req != null && req.isHasReq() && req.getMaxResponseTimeMs() > 0)
+                    ? (p95 / req.getMaxResponseTimeMs()) * 100.0
+                    : 0.0;
 
             BenchmarkResult.Verdict verdict = BenchmarkResult.Verdict.PASS;
             String failReason = null;
@@ -375,6 +378,7 @@ public class BenchmarkRunner {
                     .callsPerMinute(cpm)
                     .planCost(avgPlan)
                     .slaComplianceRate(compliance)
+                    .slaRiskPct(slaRiskPct)
                     .latencyTimeSeries(accumulator.latencySeries.getOrDefault(qid, List.of()))
                     .verdict(verdict)
                     .failReason(failReason)
