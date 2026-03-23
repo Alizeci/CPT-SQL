@@ -120,6 +120,13 @@ public class LoadProfileBuilder {
                 .findFirst()
                 .orElse(null);
 
+        // avgRowCount: promedio de filas afectadas (sólo muestras con rowCount > 0, i.e. writes)
+        double avgRowCount = samples.stream()
+                .mapToLong(TransactionRecord::getRowCount)
+                .filter(rc -> rc > 0)
+                .average()
+                .orElse(0.0);
+
         return LoadProfile.QueryStats.builder()
                 .queryId(queryId)
                 .sampleCount(n)
@@ -131,6 +138,7 @@ public class LoadProfileBuilder {
                 .minMs(min)
                 .maxMs(max)
                 .capturedSql(capturedSql)
+                .avgRowCount(avgRowCount)
                 .build();
     }
 

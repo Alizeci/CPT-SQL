@@ -16,8 +16,9 @@ dependencies {
     // Spring Web: @RestController para el endpoint de CaptureToggle
     implementation 'org.springframework.boot:spring-boot-starter-web'
 
-    // Jackson: deserialización de queries.json generado en Fase 1
+    // Jackson: deserialización de queries.json (Fase 1) y serialización de ValidationReport
     implementation 'com.fasterxml.jackson.core:jackson-databind'
+    implementation 'com.fasterxml.jackson.datatype:jackson-datatype-jsr310'
 
     // Lombok
     compileOnly      'org.projectlombok:lombok:1.18.32'

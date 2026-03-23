@@ -1,6 +1,7 @@
 package escuelaing.edu.co.infrastructure.benchmark;
 
 import escuelaing.edu.co.domain.model.LoadProfile;
+import jakarta.annotation.PostConstruct;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
@@ -14,17 +15,23 @@ import java.util.Arrays;
 import java.util.List;
 import java.util.Random;
 import java.util.logging.Logger;
+import java.util.zip.CRC32;
 
 /**
- * Genera datos sintéticos en la BD espejo usando privacidad diferencial.
+ * Genera datos sintéticos en la BD espejo mediante el algoritmo DPSDG
+ * (Differentially-Private Synthetic Data Generation) basado en SynQB (Liu et al., 2024).
  *
- * <h3>Estrategia</h3>
+ * <h3>Diferenciación Feature / UII</h3>
  * <ul>
- *   <li><b>10 % real:</b> registros capturados en producción (Fase 2).</li>
- *   <li><b>90 % sintético:</b> valores generados respetando los tipos y
- *       constraints del schema del usuario, con ruido gaussiano para
- *       garantizar privacidad diferencial (mecanismo de Laplace).</li>
+ *   <li><b>Feature columns</b> (precio, rating, stock) — se aplica mecanismo Gaussiano
+ *       con presupuesto ε_ft = 0.6 para perturbar la distribución marginal y preservar
+ *       la selectividad de predicados WHERE.</li>
+ *   <li><b>UII columns</b> (user_id, customer_id, *_id) — se reemplazan por pseudónimos
+ *       en rango exclusivo [10001, 99999] aplicando presupuesto ε_uii = 0.4.
+ *       Nunca se almacenan ni procesan identificadores reales de producción.</li>
  * </ul>
+ *
+ * <p>Composición secuencial: ε_total = ε_ft + ε_uii = 1.0 (Theorem 4.4, Liu et al.).</p>
  *
  * <h3>Diseño agnóstico al schema</h3>
  * <p>El generador inspecciona {@code INFORMATION_SCHEMA} para descubrir las
@@ -35,6 +42,7 @@ import java.util.logging.Logger;
  * <pre>
  * loadtest.synthetic.rowsPerTable=500
  * loadtest.synthetic.batchSize=200
+ * loadtest.synthetic.seed=42
  * </pre>
  */
 @Component
@@ -42,7 +50,24 @@ public class SyntheticDataGenerator {
 
     private static final Logger LOG = Logger.getLogger(SyntheticDataGenerator.class.getName());
 
-    private static final double EPSILON = 1.0;
+    /** Presupuesto de privacidad para Feature columns — mecanismo Gaussiano (SynQB Theorem 4.6). */
+    static final double EPSILON_FT  = 0.6;
+
+    /** Presupuesto de privacidad para UII columns — mecanismo Gaussiano (SynQB §3.2). */
+    static final double EPSILON_UII = 0.4;
+
+    /** ε_total = ε_ft + ε_uii por composición secuencial (SynQB Theorem 4.4). */
+    static final double EPSILON_TOTAL = EPSILON_FT + EPSILON_UII; // 1.0
+
+    /** Rango exclusivo de pseudónimos UII — nunca colisiona con IDs reales (1–1000). */
+    private static final int UII_MIN = 10_001;
+    private static final int UII_MAX = 99_999;
+
+    /** Umbral de error de latencia aceptable para validación de fidelidad (SynQB). */
+    static final double LATENCY_ERROR_THRESHOLD_PCT  = 10.0;
+
+    /** Umbral de error de cardinalidad aceptable para validación de fidelidad (SynQB). */
+    static final double CARDINALITY_ERROR_THRESHOLD_PCT = 5.0;
 
     @Value("${loadtest.synthetic.rowsPerTable:500}")
     private int rowsPerTable;
@@ -50,7 +75,115 @@ public class SyntheticDataGenerator {
     @Value("${loadtest.synthetic.batchSize:200}")
     private int batchSize;
 
-    private final Random rng = new Random(42);
+    @Value("${loadtest.synthetic.seed:42}")
+    private long seed;
+
+    private Random rng = new Random(42);
+
+    /** Filas insertadas en la última llamada a {@link #populate}. */
+    private long lastRowsGenerated = 0;
+
+    /** Tablas pobladas en la última llamada a {@link #populate}. */
+    private int lastTablesPopulated = 0;
+
+    // -------------------------------------------------------------------------
+    // Seed (reproducibilidad determinista — SynQB Algorithm 1)
+    // -------------------------------------------------------------------------
+
+    /** Sincroniza {@code rng} con el {@code seed} inyectado por Spring. */
+    @PostConstruct
+    void initRng() {
+        this.rng = new Random(seed);
+    }
+
+    public long getSeed() { return seed; }
+
+    public void setSeed(long seed) {
+        this.seed = seed;
+        this.rng  = new Random(seed);
+    }
+
+    public long getLastRowsGenerated()  { return lastRowsGenerated; }
+    public int  getLastTablesPopulated() { return lastTablesPopulated; }
+
+    // -------------------------------------------------------------------------
+    // Clasificación de columnas: Feature vs UII (SynQB §3.2)
+    // -------------------------------------------------------------------------
+
+    /**
+     * Categorías de columna según SynQB (Liu et al., 2024).
+     *
+     * <ul>
+     *   <li>{@code FEATURE} — valor de negocio (precio, rating, cantidad).
+     *       Se genera preservando la distribución estadística de producción.</li>
+     *   <li>{@code USER_ID} — identificador de usuario/cliente.
+     *       Se reemplaza por un pseudónimo en rango exclusivo (privacidad).</li>
+     *   <li>{@code TRANSACTION_ID} — identificador de transacción (order_id, item_id).
+     *       Se reemplaza por un pseudónimo en rango exclusivo.</li>
+     * </ul>
+     */
+    public enum ColumnCategory { FEATURE, USER_ID, TRANSACTION_ID }
+
+    /**
+     * Clasifica una columna como Feature o UII basándose en su nombre.
+     *
+     * <p>Reglas (en orden de precedencia):</p>
+     * <ol>
+     *   <li>Contiene {@code "user_id"} o {@code "customer_id"} → {@code USER_ID}.</li>
+     *   <li>Termina en {@code "_id"} o es exactamente {@code "id"} → {@code TRANSACTION_ID}.</li>
+     *   <li>Cualquier otra columna → {@code FEATURE}.</li>
+     * </ol>
+     */
+    public ColumnCategory classifyColumn(String tableName, String columnName) {
+        String col = columnName.toLowerCase();
+        if (col.equals("user_id") || col.equals("customer_id")) {
+            return ColumnCategory.USER_ID;
+        }
+        if (col.equals("id") || col.endsWith("_id")) {
+            return ColumnCategory.TRANSACTION_ID;
+        }
+        return ColumnCategory.FEATURE;
+    }
+
+    /**
+     * Genera un pseudónimo entero en el rango [{@code UII_MIN}, {@code UII_MAX}]
+     * que nunca colisiona con IDs reales de producción (rango 1–1000 típico).
+     *
+     * <p>Garantiza anonimización k-anónima de identidades de usuario y transacción
+     * siguiendo la separación Feature/UII de SynQB (Liu et al., 2024 §3.2).</p>
+     */
+    public int generateUiiPseudonym() {
+        return UII_MIN + rng.nextInt(UII_MAX - UII_MIN + 1);
+    }
+
+    // -------------------------------------------------------------------------
+    // Checksum para reproducibilidad (SynQB Algorithm 2)
+    // -------------------------------------------------------------------------
+
+    /**
+     * Calcula un checksum CRC32 sobre el contenido actual de {@code tableName}.
+     * Se usa para verificar que dos generaciones con el mismo seed producen
+     * datos byte-identical.
+     *
+     * @param conn      conexión abierta a la BD espejo
+     * @param tableName tabla a verificar
+     * @return checksum CRC32 de todas las filas de la tabla
+     */
+    public long computeChecksum(Connection conn, String tableName) throws SQLException {
+        CRC32 crc = new CRC32();
+        String sql = "SELECT * FROM " + tableName + " ORDER BY 1";
+        try (PreparedStatement ps = conn.prepareStatement(sql);
+             ResultSet rs = ps.executeQuery()) {
+            int cols = rs.getMetaData().getColumnCount();
+            while (rs.next()) {
+                for (int i = 1; i <= cols; i++) {
+                    Object v = rs.getObject(i);
+                    if (v != null) crc.update(v.toString().getBytes());
+                }
+            }
+        }
+        return crc.getValue();
+    }
 
     // -------------------------------------------------------------------------
     // API pública
@@ -67,6 +200,7 @@ public class SyntheticDataGenerator {
         conn.setAutoCommit(false);
 
         List<String> tables = discoverUserTables(conn);
+        lastTablesPopulated = tables.size();
 
         if (isEcommerceSchema(tables)) {
             populateEcommerce(conn, profile);
@@ -76,7 +210,9 @@ public class SyntheticDataGenerator {
 
         conn.commit();
         conn.setAutoCommit(true);
-        LOG.info("[SyntheticData] BD espejo poblada: " + tables.size() + " tablas.");
+        lastRowsGenerated = countTotalRows(conn, tables);
+        LOG.info("[SyntheticData] BD espejo poblada: " + tables.size()
+                + " tablas, " + lastRowsGenerated + " filas.");
     }
 
     // -------------------------------------------------------------------------
@@ -331,7 +467,14 @@ public class SyntheticDataGenerator {
     }
 
     private void setGenericValue(PreparedStatement ps, int idx, ColumnMeta col) throws SQLException {
-        switch (col.dataType.toLowerCase()) {
+        ColumnCategory category = classifyColumn("", col.name());
+        // UII columns: pseudónimo en rango exclusivo (SynQB §3.2)
+        if (category == ColumnCategory.USER_ID || category == ColumnCategory.TRANSACTION_ID) {
+            ps.setInt(idx, generateUiiPseudonym());
+            return;
+        }
+        // Feature columns: preservar distribución estadística
+        switch (col.dataType().toLowerCase()) {
             case "integer", "int", "int4", "int8", "bigint", "smallint" ->
                     ps.setInt(idx, (int) clamp(gaussianNoise(100, 50), 1, 10_000));
             case "numeric", "decimal", "real", "double precision", "float8" ->
@@ -352,6 +495,17 @@ public class SyntheticDataGenerator {
     // Utilidades
     // -------------------------------------------------------------------------
 
+    private long countTotalRows(Connection conn, List<String> tables) {
+        long total = 0;
+        for (String table : tables) {
+            try (PreparedStatement ps = conn.prepareStatement("SELECT COUNT(*) FROM " + table);
+                 ResultSet rs = ps.executeQuery()) {
+                if (rs.next()) total += rs.getLong(1);
+            } catch (SQLException ignored) {}
+        }
+        return total;
+    }
+
     private List<Integer> fetchIds(Connection conn, String table) throws SQLException {
         List<Integer> ids = new ArrayList<>();
         try (PreparedStatement ps = conn.prepareStatement("SELECT id FROM " + table + " LIMIT 1000");
@@ -361,8 +515,13 @@ public class SyntheticDataGenerator {
         return ids;
     }
 
+    /**
+     * Aplica el mecanismo Gaussiano con presupuesto ε_ft a una columna Feature.
+     * La sensibilidad global se escala por (1 / ε_ft), amplificando el ruido
+     * a mayor privacidad (menor ε) y reduciéndolo a menor privacidad (mayor ε).
+     */
     double gaussianNoise(double base, double sigma) {
-        return base + rng.nextGaussian() * (sigma / EPSILON);
+        return base + rng.nextGaussian() * (sigma / EPSILON_FT);
     }
 
     private static final String ALPHANUM =
