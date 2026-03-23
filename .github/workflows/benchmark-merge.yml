@@ -1,0 +1,66 @@
+name: Benchmark — Post-merge (actualiza baseline)
+
+# Corre cuando se mergea a develop o main.
+# Si el benchmark pasa, actualiza baseline.json y lo commitea al repo.
+on:
+  push:
+    branches: [main, develop]
+
+jobs:
+  benchmark-baseline:
+    runs-on: self-hosted
+
+    steps:
+      # ── 1. Checkout ──────────────────────────────────────────────────────────
+      - uses: actions/checkout@v4
+
+      # ── 2. Limpiar estado anterior ────────────────────────────────────────────
+      - name: Limpiar contenedor espejo anterior
+        run: docker rm -f cpt-sql-mirror || true
+
+      # ── Fase 1: compilar y generar queries.json ───────────────────────────────
+      - name: "Fase 1 — Compilar y generar queries.json"
+        run: ./gradlew :sql-testing-demo:compileJava
+
+      # ── Fase 2: simular tráfico y capturar LoadProfile ────────────────────────
+      - name: "Fase 2 — Simular tráfico y capturar load-profile.json"
+        run: ./gradlew :sql-testing-demo:runSimulator
+        env:
+          DB_URL: jdbc:postgresql://localhost:5432/ecommerce_demo
+          DB_USER: ${{ secrets.DEMO_DB_USER }}
+          DB_PASSWORD: ${{ secrets.DEMO_DB_PASSWORD }}
+
+      # ── Build fat JAR ─────────────────────────────────────────────────────────
+      - name: Build fat JAR (BenchmarkMain)
+        run: ./gradlew :sql-testing-demo:bootJar
+
+      # ── Fases 3 + 4: benchmark — actualiza baseline si PASS ───────────────────
+      # GITHUB_EVENT_NAME="push" → BenchmarkMain sí actualiza baseline.json
+      - name: "Fases 3+4 — Benchmark y actualización de baseline"
+        run: |
+          java -jar sql-testing-demo/build/libs/sql-testing-demo.jar \
+            --loadtest.benchmark.testProfile=light \
+            --loadtest.mirror.schema.script=sql-testing-demo/src/main/resources/schema-ecommerce.sql
+        env:
+          GITHUB_SHA: ${{ github.sha }}
+
+      # ── Commitear baseline.json actualizado ───────────────────────────────────
+      # Solo si el archivo cambió. El bot de GitHub Actions hace el commit.
+      - name: Commitear baseline.json actualizado
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add baseline.json
+          git diff --staged --quiet || git commit -m "chore: actualizar baseline.json post-merge [skip ci]"
+          git push
+
+      # ── Artefactos ────────────────────────────────────────────────────────────
+      - name: Subir artefactos de resultado
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-merge-${{ github.sha }}
+          path: |
+            load-profile.json
+            baseline.json
+            build/results/
