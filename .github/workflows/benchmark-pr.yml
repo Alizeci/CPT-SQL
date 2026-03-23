@@ -53,7 +53,7 @@ jobs:
       #   6. Sale con código 1 si detecta regresiones → falla el CI
       - name: "Fases 3+4 — Benchmark y detección de regresiones"
         run: |
-          java -jar sql-testing-demo/build/libs/sql-testing-demo-*.jar \
+          java -jar sql-testing-demo/build/libs/sql-testing-demo.jar \
             --loadtest.benchmark.testProfile=light \
             --loadtest.mirror.schema.script=sql-testing-demo/src/main/resources/schema-ecommerce.sql
         env:
