@@ -77,9 +77,13 @@ public class BenchmarkMain {
             System.out.println("Veredicto : " + result.getOverallVerdict());
             System.out.println("Perfil    : " + result.getTestProfileName());
             System.out.println("Muestras  : " + result.getTotalOperations());
-            result.getQueries().forEach((qid, qr) ->
-                System.out.printf("  %-35s p95=%5.0f ms  sla=%.1f%%  verdict=%s%n",
-                        qid, qr.getP95Ms(), qr.getSlaComplianceRate(), qr.getVerdict()));
+            result.getQueries().forEach((qid, qr) -> {
+                String risk = "";
+                if (qr.getSlaRiskPct() >= 90) risk = "  !! CRITICO: " + String.format("%.0f%%", qr.getSlaRiskPct()) + " del SLA";
+                else if (qr.getSlaRiskPct() >= 70) risk = "  !! RIESGO: " + String.format("%.0f%%", qr.getSlaRiskPct()) + " del SLA";
+                System.out.printf("  %-35s p95=%5.0f ms  sla=%.1f%%  verdict=%s%s%n",
+                        qid, qr.getP95Ms(), qr.getSlaComplianceRate(), qr.getVerdict(), risk);
+            });
 
             if (report.isHasRegressions()) {
                 System.err.println("\n=== REGRESIONES DETECTADAS ===");
