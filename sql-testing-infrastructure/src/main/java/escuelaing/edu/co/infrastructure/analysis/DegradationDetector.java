@@ -156,11 +156,11 @@ public class DegradationDetector {
                     .queryId(queryId)
                     .type(DegradationReport.RegressionType.BASELINE_EXCEEDED)
                     .observedValue(current.getP95Ms())
-                    .thresholdValue(threshold)
+                    .thresholdValue(baseP95)
                     .description(String.format(
-                            "[%s] p95=%.0f ms supera línea base=%.0f ms (+%d%%)",
-                            queryId, current.getP95Ms(), baseP95,
-                            (int)(baselineTolerancePct * 100)))
+                            "[%s] p95=%.0f ms — %.1fx más lento que la última medición aprobada (%.0f ms)",
+                            queryId, current.getP95Ms(),
+                            current.getP95Ms() / baseP95, baseP95))
                     .build());
         }
     }
