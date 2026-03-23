@@ -1,11 +1,11 @@
 name: Benchmark — Commit (light)
 
-# Corre en cada Pull Request hacia main.
+# Corre en cada Pull Request hacia main o develop.
 # Detecta regresiones de rendimiento antes de mergear.
 # Runner: self-hosted en EC2 t2.micro (entorno consistente y dedicado).
 on:
   pull_request:
-    branches: [main]
+    branches: [main, develop]
 
 jobs:
   benchmark:
