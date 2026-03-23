@@ -43,4 +43,5 @@ tasks.named('compileJava') {
 tasks.register('runSimulator', JavaExec) {
     classpath = sourceSets.main.runtimeClasspath
     mainClass = 'escuelaing.edu.co.demo.EcommerceSimulator'
+    workingDir = rootProject.projectDir
 }
