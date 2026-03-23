@@ -36,7 +36,11 @@ load-profile.json
 hs_err_pid*
 replay_pid*
 
-# Ads files
-contexto_claude_code_v3.md
-contexto_implementacion.md
-Documento TG v2.pages
+# macOS
+.DS_Store
+**/.DS_Store
+
+# Docs personales
+*.md
+!README.md
+*.pages
