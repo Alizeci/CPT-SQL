@@ -52,7 +52,15 @@ public class DegradationReport {
          * El p95 medido supera el p95 de la línea base en más de un margen de tolerancia
          * (10 % por defecto).
          */
-        BASELINE_EXCEEDED
+        BASELINE_EXCEEDED,
+
+        /**
+         * El p95 medido supera el umbral interno de proximidad al SLA (80 % por defecto).
+         * Indica que la consulta está operando en zona de riesgo: una variación normal
+         * del entorno podría cruzar el SLA en la próxima ejecución.
+         * Bloquea el merge aunque el SLA aún no haya sido formalmente violado.
+         */
+        SLO_PROXIMITY
     }
 
     /**
