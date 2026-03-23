@@ -15,10 +15,10 @@ jobs:
       # ── 1. Checkout ──────────────────────────────────────────────────────────
       - uses: actions/checkout@v4
 
-      # ── 2. Limpiar estado anterior ────────────────────────────────────────────
+      # ── 2. Limpieza ───────────────────────────────────────────────────────────
       # Elimina el contenedor espejo de una ejecución previa fallida.
       # El || true evita que el step falle si el contenedor no existe.
-      - name: Limpiar contenedor espejo anterior
+      - name: Eliminar contenedor espejo previo
         run: docker rm -f cpt-sql-mirror || true
 
       # ── Fase 1: compilar y generar queries.json ───────────────────────────────
@@ -40,7 +40,7 @@ jobs:
           DB_PASSWORD: ${{ secrets.DEMO_DB_PASSWORD }}
 
       # ── Build fat JAR ─────────────────────────────────────────────────────────
-      - name: Build fat JAR (BenchmarkMain)
+      - name: Compilar artefacto ejecutable (fat JAR)
         run: ./gradlew :sql-testing-demo:bootJar
 
       # ── Fases 3 + 4: benchmark y detección de regresiones ─────────────────────
@@ -59,10 +59,20 @@ jobs:
         env:
           GITHUB_SHA: ${{ github.sha }}
 
-      # ── Comentario de advertencia en el PR ───────────────────────────────────
+      # ── Guardar candidato de baseline en caché ────────────────────────────────
+      # El workflow post-merge lo recupera por SHA y actualiza baseline.json
+      # sin necesidad de volver a ejecutar el benchmark.
+      - name: Guardar candidato de baseline en caché
+        if: hashFiles('baseline-candidate.json') != ''
+        uses: actions/cache/save@v4
+        with:
+          path: baseline-candidate.json
+          key: baseline-candidate-${{ github.sha }}
+
+      # ── Notificación de advertencias en el PR ─────────────────────────────────
       # Si BenchmarkMain escribió benchmark-warnings.txt (BASELINE_EXCEEDED),
-      # se postea como comentario visible en la conversación del PR.
-      - name: Postear advertencias en el PR
+      # se publica como comentario visible en la conversación del PR.
+      - name: Publicar advertencias en el PR
         if: always() && hashFiles('benchmark-warnings.txt') != ''
         run: |
           BODY=$(python3 -c "import json,sys; print(json.dumps(sys.stdin.read()))" < benchmark-warnings.txt)
@@ -74,7 +84,7 @@ jobs:
 
       # ── Artefactos ────────────────────────────────────────────────────────────
       # Se suben siempre (if: always()) para poder analizar fallos.
-      - name: Subir artefactos de resultado
+      - name: Publicar artefactos de resultado
         if: always()
         uses: actions/upload-artifact@v4
         with:

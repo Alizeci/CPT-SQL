@@ -85,6 +85,10 @@ public class BaselineManager {
      * @param result resultado aprobado que se convierte en la nueva línea base
      */
     public void save(BenchmarkResult result) {
+        saveAs(result, baselinePath);
+    }
+
+    public void saveAs(BenchmarkResult result, String path) {
         BaselineFile baseline = new BaselineFile();
         baseline.commitSha   = result.getCommitSha();
         baseline.profileName = result.getProfileName();
@@ -92,10 +96,10 @@ public class BaselineManager {
         baseline.queries     = new HashMap<>(result.getQueries());
 
         try {
-            mapper.writerWithDefaultPrettyPrinter().writeValue(new File(baselinePath), baseline);
-            LOG.info("[BaselineManager] baseline.json actualizado (commit=" + result.getCommitSha() + ").");
+            mapper.writerWithDefaultPrettyPrinter().writeValue(new File(path), baseline);
+            LOG.info("[BaselineManager] " + path + " actualizado (commit=" + result.getCommitSha() + ").");
         } catch (IOException e) {
-            throw new RuntimeException("No se pudo guardar baseline.json", e);
+            throw new RuntimeException("No se pudo guardar " + path, e);
         }
     }
 
