@@ -1,3 +1,16 @@
+# IDE and build tool directories
+.gradle/
+.idea/
+.vscode/
+
+# Build output
+build/
+*/build/
+out/
+
+# Generated files
+load-profile.json
+
 # Compiled class file
 *.class
 
@@ -22,3 +35,12 @@
 # virtual machine crash logs, see http://www.java.com/en/download/help/error_hotspot.xml
 hs_err_pid*
 replay_pid*
+
+# macOS
+.DS_Store
+**/.DS_Store
+
+# Docs personales
+*.md
+!README.md
+*.pages
