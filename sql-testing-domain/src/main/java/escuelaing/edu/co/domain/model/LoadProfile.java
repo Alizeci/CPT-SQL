@@ -1,7 +1,9 @@
 package escuelaing.edu.co.domain.model;
 
+import lombok.AllArgsConstructor;
 import lombok.Builder;
 import lombok.Data;
+import lombok.NoArgsConstructor;
 
 import java.time.Instant;
 import java.util.Map;
@@ -16,6 +18,8 @@ import java.util.Map;
  */
 @Data
 @Builder
+@NoArgsConstructor
+@AllArgsConstructor
 public class LoadProfile {
 
     /** Momento en que se generó el perfil. */
@@ -34,6 +38,8 @@ public class LoadProfile {
      */
     @Data
     @Builder
+    @NoArgsConstructor
+    @AllArgsConstructor
     public static class QueryStats {
 
         /** {@code queryId} al que pertenecen estas estadísticas. */

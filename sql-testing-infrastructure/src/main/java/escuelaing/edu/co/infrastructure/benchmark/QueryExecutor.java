@@ -35,6 +35,9 @@ public class QueryExecutor {
 
     private static final Logger LOG = Logger.getLogger(QueryExecutor.class.getName());
 
+    private static final String[] SYNTHETIC_CATEGORIES =
+            {"electronics", "clothing", "books", "sports", "home", "beauty", "toys", "food"};
+
     private final Random rng = new Random();
 
     public QueryExecutor() {}
@@ -92,8 +95,15 @@ public class QueryExecutor {
 
         try (PreparedStatement ps = conn.prepareStatement(resolvedSql)) {
             bindSyntheticParameters(ps, accessDist, zipfAlpha);
-            try (ResultSet rs = ps.executeQuery()) {
-                while (rs.next()) { /* consumir el cursor */ }
+            String verb = resolvedSql.strip().toUpperCase();
+            boolean isDml = verb.startsWith("UPDATE") || verb.startsWith("DELETE")
+                    || (verb.startsWith("INSERT") && !verb.contains("RETURNING"));
+            if (isDml) {
+                ps.executeUpdate();
+            } else {
+                try (ResultSet rs = ps.executeQuery()) {
+                    while (rs.next()) { /* consumir el cursor */ }
+                }
             }
         } catch (SQLException e) {
             LOG.warning("[QueryExecutor] Error ejecutando " + queryId + ": " + e.getMessage());
@@ -137,10 +147,23 @@ public class QueryExecutor {
         try {
             java.sql.ParameterMetaData meta = ps.getParameterMetaData();
             for (int i = 1; i <= meta.getParameterCount(); i++) {
-                int value = (dist == TestProfile.AccessDistribution.ZIPF)
-                        ? zipfInt(1_000, zipfAlpha)
-                        : syntheticInt(1, 1_000);
-                ps.setInt(i, value);
+                int sqlType;
+                try { sqlType = meta.getParameterType(i); }
+                catch (SQLException ex) { sqlType = java.sql.Types.INTEGER; }
+
+                switch (sqlType) {
+                    case java.sql.Types.VARCHAR,
+                         java.sql.Types.CHAR,
+                         java.sql.Types.LONGVARCHAR,
+                         java.sql.Types.NVARCHAR ->
+                        ps.setString(i, SYNTHETIC_CATEGORIES[rng.nextInt(SYNTHETIC_CATEGORIES.length)]);
+                    default -> {
+                        int value = (dist == TestProfile.AccessDistribution.ZIPF)
+                                ? zipfInt(500, zipfAlpha)
+                                : syntheticInt(1, 500);
+                        ps.setInt(i, value);
+                    }
+                }
             }
         } catch (SQLException ignored) {
             // Algunos drivers lanzan excepción en getParameterMetaData — ignorar
