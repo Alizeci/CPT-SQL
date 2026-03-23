@@ -31,4 +31,10 @@ public class TransactionRecord {
      * cuando no se solicitó captura de plan para esta muestra.
      */
     private String executionPlan;
+
+    /**
+     * Filas afectadas por la operación (INSERT/UPDATE/DELETE).
+     * {@code 0} para SELECT o cuando no se pudo determinar.
+     */
+    private long rowCount;
 }
