@@ -14,6 +14,8 @@ import org.springframework.boot.autoconfigure.SpringBootApplication;
 import org.springframework.context.annotation.Bean;
 
 import java.io.File;
+import java.io.PrintWriter;
+import java.util.List;
 
 /**
  * Punto de entrada del motor de benchmark CPT-SQL (Fases 3 y 4).
@@ -36,8 +38,8 @@ import java.io.File;
  *
  * <h3>Códigos de salida</h3>
  * <ul>
- *   <li>{@code 0} — benchmark PASS, baseline actualizado.</li>
- *   <li>{@code 1} — regresiones detectadas o benchmark FAIL.</li>
+ *   <li>{@code 0} — sin regresiones críticas (puede haber advertencias BASELINE_EXCEEDED).</li>
+ *   <li>{@code 1} — SLA violado (P95_EXCEEDED) o plan de ejecución cambiado (PLAN_CHANGED).</li>
  * </ul>
  */
 @SpringBootApplication(scanBasePackages = "escuelaing.edu.co.infrastructure")
@@ -77,24 +79,63 @@ public class BenchmarkMain {
             System.out.println("Veredicto : " + result.getOverallVerdict());
             System.out.println("Perfil    : " + result.getTestProfileName());
             System.out.println("Muestras  : " + result.getTotalOperations());
-            result.getQueries().forEach((qid, qr) ->
-                System.out.printf("  %-35s p95=%5.0f ms  sla=%.1f%%  verdict=%s%n",
-                        qid, qr.getP95Ms(), qr.getSlaComplianceRate(), qr.getVerdict()));
+            result.getQueries().forEach((qid, qr) -> {
+                String risk = "";
+                if (qr.getSlaRiskPct() >= 90) risk = "  !! CRITICO: " + String.format("%.0f%%", qr.getSlaRiskPct()) + " del SLA";
+                else if (qr.getSlaRiskPct() >= 70) risk = "  !! RIESGO: " + String.format("%.0f%%", qr.getSlaRiskPct()) + " del SLA";
+                System.out.printf("  %-35s p95=%5.0f ms  sla=%.1f%%  verdict=%s%s%n",
+                        qid, qr.getP95Ms(), qr.getSlaComplianceRate(), qr.getVerdict(), risk);
+            });
 
-            if (report.isHasRegressions()) {
-                System.err.println("\n=== REGRESIONES DETECTADAS ===");
-                report.getRegressions().forEach(r ->
-                    System.err.println("  [" + r.getType() + "] " + r.getDescription()));
+            // --- Clasificar regresiones: críticas (exit 1) vs advertencias (exit 0) ---
+            List<DegradationReport.Regression> blocking = report.getRegressions().stream()
+                    .filter(r -> r.getType() != DegradationReport.RegressionType.BASELINE_EXCEEDED)
+                    .collect(java.util.stream.Collectors.toList());
+
+            List<DegradationReport.Regression> warnings = report.getRegressions().stream()
+                    .filter(r -> r.getType() == DegradationReport.RegressionType.BASELINE_EXCEEDED)
+                    .collect(java.util.stream.Collectors.toList());
+
+            if (!warnings.isEmpty()) {
+                System.out.println("\n=== ADVERTENCIAS DE DEGRADACIÓN (no bloquean) ===");
+                warnings.forEach(r -> System.out.println("  " + r.getDescription()));
+
+                // Escribir benchmark-warnings.txt para que el workflow lo postee como comentario en el PR
+                try (PrintWriter pw = new PrintWriter("benchmark-warnings.txt")) {
+                    pw.println("🟡 **CPT-SQL — Advertencia de degradación**\n");
+                    warnings.forEach(r -> {
+                        BenchmarkResult.QueryResult qr = result.getQueries().get(r.getQueryId());
+                        String slaLine = qr != null
+                                ? String.format("SLA aún cumplido (%.0f%% del límite) — el merge está permitido.", qr.getSlaRiskPct())
+                                : "SLA aún cumplido — el merge está permitido.";
+                        pw.println(r.getDescription());
+                        pw.println(slaLine);
+                        pw.println();
+                    });
+                } catch (Exception e) {
+                    System.err.println("[BenchmarkMain] No se pudo escribir benchmark-warnings.txt: " + e.getMessage());
+                }
+            }
+
+            if (!blocking.isEmpty()) {
+                System.err.println("\n=== REGRESIONES CRÍTICAS DETECTADAS ===");
+                blocking.forEach(r ->
+                    System.err.println("  [FALLO] [" + r.getType() + "] " + r.getDescription()));
                 System.exit(1);
             }
 
-            // --- Actualizar baseline solo si PASS ---
-            if (result.getOverallVerdict() == BenchmarkResult.Verdict.PASS) {
+            // --- Actualizar baseline solo post-merge (nunca en PR) ---
+            // En GitHub Actions, GITHUB_EVENT_NAME="pull_request" en PRs y "push" tras merge.
+            // Localmente la variable no existe → se actualiza para facilitar el desarrollo.
+            boolean isPullRequest = "pull_request".equals(System.getenv("GITHUB_EVENT_NAME"));
+            if (isPullRequest) {
+                System.out.println("\n[BenchmarkMain] PR check — baseline.json no se modifica.");
+            } else if (result.getOverallVerdict() == BenchmarkResult.Verdict.PASS) {
                 baselineManager.save(result);
-                System.out.println("\n[BenchmarkMain] baseline.json actualizado.");
+                System.out.println("\n[BenchmarkMain] baseline.json actualizado (post-merge).");
             }
 
-            System.out.println("[BenchmarkMain] Sin regresiones. Pipeline OK.");
+            System.out.println("[BenchmarkMain] Pipeline OK." + (warnings.isEmpty() ? "" : " (con advertencias de degradación)"));
         };
     }
 }

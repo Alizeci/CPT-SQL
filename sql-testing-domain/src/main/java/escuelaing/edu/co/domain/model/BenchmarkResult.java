@@ -1,7 +1,9 @@
 package escuelaing.edu.co.domain.model;
 
+import lombok.AllArgsConstructor;
 import lombok.Builder;
 import lombok.Data;
+import lombok.NoArgsConstructor;
 
 import java.time.Instant;
 import java.util.List;
@@ -29,6 +31,8 @@ import java.util.Map;
  */
 @Data
 @Builder
+@NoArgsConstructor
+@AllArgsConstructor
 public class BenchmarkResult {
 
     /** Nombre del perfil de carga ejecutado (ej. "pre-test", "nightly"). */
@@ -78,6 +82,8 @@ public class BenchmarkResult {
      */
     @Data
     @Builder
+    @NoArgsConstructor
+    @AllArgsConstructor
     public static class ThroughputSnapshot {
 
         /** Milisegundos transcurridos desde el inicio de la ventana de medición. */
@@ -96,6 +102,8 @@ public class BenchmarkResult {
      */
     @Data
     @Builder
+    @NoArgsConstructor
+    @AllArgsConstructor
     public static class LatencySnapshot {
 
         /** Milisegundos transcurridos desde el inicio de la ventana de medición. */
@@ -119,6 +127,8 @@ public class BenchmarkResult {
      */
     @Data
     @Builder
+    @NoArgsConstructor
+    @AllArgsConstructor
     public static class QueryResult {
 
         /** Identificador de la consulta — puente con Fase 1. */
@@ -163,6 +173,13 @@ public class BenchmarkResult {
          * del umbral {@code maxResponseTimeMs}.</p>
          */
         private double slaComplianceRate;
+
+        /**
+         * Porcentaje del umbral SLA consumido por el p95 medido.
+         * Ejemplo: p95=86ms con SLA=100ms → slaRiskPct=86%.
+         * Valores > 70% indican riesgo de violación bajo mayor carga.
+         */
+        private double slaRiskPct;
 
         /**
          * Evolución de latencias por ventana de tiempo durante la medición.
