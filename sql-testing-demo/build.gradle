@@ -17,8 +17,10 @@ dependencies {
     // CPT-SQL framework (JdbcWrapper, CaptureContext, BenchmarkRunner, etc.)
     implementation project(':sql-testing-infrastructure')
 
-    // Spring Boot — solo para BenchmarkMain (runner de CI)
+    // Spring Boot — runner de CI y modo demo (UI)
     implementation 'org.springframework.boot:spring-boot-starter'
+    implementation 'org.springframework.boot:spring-boot-starter-web'
+    implementation 'org.springframework.boot:spring-boot-starter-jdbc'
 
     // PostgreSQL driver para conectar la app demo
     implementation 'org.postgresql:postgresql:42.7.3'
@@ -44,4 +46,13 @@ tasks.register('runSimulator', JavaExec) {
     classpath = sourceSets.main.runtimeClasspath
     mainClass = 'escuelaing.edu.co.demo.EcommerceSimulator'
     workingDir = rootProject.projectDir
+}
+
+// Levanta la app demo del catálogo (UI de demostración CPT-SQL)
+// Acceder en: http://localhost:8080
+tasks.register('runDemo', JavaExec) {
+    classpath = sourceSets.main.runtimeClasspath
+    mainClass = 'escuelaing.edu.co.demo.ui.EcommerceDemoApp'
+    workingDir = rootProject.projectDir
+    args = ['--spring.profiles.active=demo']
 }
