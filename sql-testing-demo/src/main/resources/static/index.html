@@ -1,0 +1,272 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ShopDemo — Catálogo de Productos</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: #f5f5f5;
+      color: #222;
+    }
+
+    header {
+      background: #1a1a2e;
+      color: white;
+      padding: 16px 32px;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+    header h1 { font-size: 1.3rem; font-weight: 600; }
+    header span { font-size: 0.85rem; opacity: 0.6; margin-left: auto; }
+
+    .banner {
+      background: #fff3cd;
+      border-left: 4px solid #f0ad4e;
+      padding: 12px 32px;
+      font-size: 0.85rem;
+      color: #856404;
+    }
+    .banner strong { color: #533f03; }
+
+    .controls {
+      padding: 20px 32px;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+    .controls label { font-weight: 500; font-size: 0.9rem; }
+    .controls select {
+      padding: 8px 12px;
+      border: 1px solid #ccc;
+      border-radius: 6px;
+      font-size: 0.9rem;
+      background: white;
+    }
+    .controls button {
+      padding: 8px 20px;
+      background: #1a1a2e;
+      color: white;
+      border: none;
+      border-radius: 6px;
+      font-size: 0.9rem;
+      cursor: pointer;
+    }
+    .controls button:hover { background: #16213e; }
+
+    .metrics {
+      padding: 0 32px 16px;
+      display: flex;
+      gap: 24px;
+      align-items: center;
+    }
+    .metric-box {
+      background: white;
+      border-radius: 8px;
+      padding: 14px 20px;
+      border: 1px solid #e0e0e0;
+      min-width: 160px;
+    }
+    .metric-box .label { font-size: 0.75rem; color: #888; text-transform: uppercase; letter-spacing: 0.05em; }
+    .metric-box .value { font-size: 2rem; font-weight: 700; margin-top: 4px; }
+    .metric-box .value.fast  { color: #28a745; }
+    .metric-box .value.warn  { color: #f0ad4e; }
+    .metric-box .value.slow  { color: #dc3545; }
+    .metric-box .sublabel { font-size: 0.75rem; color: #aaa; margin-top: 2px; }
+
+    .table-wrapper {
+      padding: 0 32px 32px;
+    }
+    table {
+      width: 100%;
+      background: white;
+      border-radius: 8px;
+      border: 1px solid #e0e0e0;
+      border-collapse: collapse;
+      font-size: 0.875rem;
+    }
+    thead th {
+      background: #f9f9f9;
+      padding: 12px 16px;
+      text-align: left;
+      font-weight: 600;
+      color: #555;
+      border-bottom: 1px solid #e0e0e0;
+      font-size: 0.78rem;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+    tbody tr:hover { background: #fafafa; }
+    tbody td {
+      padding: 11px 16px;
+      border-bottom: 1px solid #f0f0f0;
+      color: #333;
+    }
+    tbody tr:last-child td { border-bottom: none; }
+
+    .rating { color: #f0ad4e; }
+    .stock-low { color: #dc3545; font-weight: 500; }
+    .stock-ok  { color: #28a745; }
+
+    .loading {
+      padding: 40px 32px;
+      text-align: center;
+      color: #888;
+      display: none;
+    }
+    .spinner {
+      display: inline-block;
+      width: 24px; height: 24px;
+      border: 3px solid #e0e0e0;
+      border-top-color: #1a1a2e;
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+      margin-right: 8px;
+      vertical-align: middle;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    .empty { padding: 40px 32px; text-align: center; color: #aaa; }
+  </style>
+</head>
+<body>
+
+<header>
+  <h1>🛍️ ShopDemo — Catálogo de Productos</h1>
+  <span>Entorno de demostración CPT-SQL</span>
+</header>
+
+<div class="banner">
+  <strong>⚠️ Escenario sin CPT-SQL:</strong>
+  Esta pantalla usa la query degradada que llegó a producción.
+  El pipeline de pruebas de carga lo habría bloqueado en el PR antes de que los usuarios lo vieran.
+</div>
+
+<div class="controls">
+  <label for="category">Categoría:</label>
+  <select id="category">
+    <option value="electronics">Electronics</option>
+    <option value="clothing">Clothing</option>
+    <option value="books">Books</option>
+    <option value="sports">Sports</option>
+    <option value="home">Home</option>
+    <option value="beauty">Beauty</option>
+    <option value="toys">Toys</option>
+    <option value="food">Food</option>
+  </select>
+  <button onclick="loadProducts()">Buscar</button>
+</div>
+
+<div class="metrics">
+  <div class="metric-box">
+    <div class="label">Tiempo de respuesta</div>
+    <div class="value" id="query-time">—</div>
+    <div class="sublabel" id="sla-label"></div>
+  </div>
+  <div class="metric-box">
+    <div class="label">Productos encontrados</div>
+    <div class="value" style="color:#1a1a2e" id="product-count">—</div>
+    <div class="sublabel">resultados</div>
+  </div>
+</div>
+
+<div class="loading" id="loading">
+  <span class="spinner"></span> Consultando base de datos...
+</div>
+
+<div class="table-wrapper">
+  <table id="products-table" style="display:none">
+    <thead>
+      <tr>
+        <th>#</th>
+        <th>Producto</th>
+        <th>Precio</th>
+        <th>Stock</th>
+        <th>Rating</th>
+        <th>Órdenes totales</th>
+        <th>Última orden</th>
+      </tr>
+    </thead>
+    <tbody id="products-body"></tbody>
+  </table>
+  <div class="empty" id="empty" style="display:none">No se encontraron productos para esta categoría.</div>
+</div>
+
+<script>
+  const SLA_MS = 100;
+
+  async function loadProducts() {
+    const category = document.getElementById('category').value;
+    const loading   = document.getElementById('loading');
+    const table     = document.getElementById('products-table');
+    const empty     = document.getElementById('empty');
+    const timeEl    = document.getElementById('query-time');
+    const countEl   = document.getElementById('product-count');
+    const slaLabel  = document.getElementById('sla-label');
+    const tbody     = document.getElementById('products-body');
+
+    loading.style.display = 'block';
+    table.style.display   = 'none';
+    empty.style.display   = 'none';
+    timeEl.textContent    = '—';
+    timeEl.className      = 'value';
+    countEl.textContent   = '—';
+    slaLabel.textContent  = '';
+    tbody.innerHTML       = '';
+
+    const res  = await fetch(`/api/products?category=${category}`);
+    const data = await res.json();
+    loading.style.display = 'none';
+
+    const ms = data.queryTimeMs;
+    timeEl.textContent = ms + ' ms';
+
+    if (ms >= SLA_MS) {
+      timeEl.className = 'value slow';
+      slaLabel.textContent = '❌ SLA excedido (límite: ' + SLA_MS + ' ms)';
+    } else if (ms >= SLA_MS * 0.8) {
+      timeEl.className = 'value warn';
+      slaLabel.textContent = '⚠️ Zona de riesgo (80% del SLA)';
+    } else {
+      timeEl.className = 'value fast';
+      slaLabel.textContent = '✅ Dentro del SLA';
+    }
+
+    countEl.textContent = data.count;
+
+    if (data.products.length === 0) {
+      empty.style.display = 'block';
+      return;
+    }
+
+    data.products.forEach((p, i) => {
+      const stars   = '★'.repeat(Math.round(p.rating || 0)) + '☆'.repeat(5 - Math.round(p.rating || 0));
+      const stockCls = p.stock_quantity < 20 ? 'stock-low' : 'stock-ok';
+      const lastOrder = p.last_order
+        ? new Date(p.last_order).toLocaleDateString('es-CO')
+        : '—';
+
+      tbody.innerHTML += `
+        <tr>
+          <td>${i + 1}</td>
+          <td>${p.name}</td>
+          <td>$${parseFloat(p.price).toFixed(2)}</td>
+          <td class="${stockCls}">${p.stock_quantity}</td>
+          <td class="rating">${stars} <span style="color:#666">${parseFloat(p.rating || 0).toFixed(1)}</span></td>
+          <td>${p.total_orders || 0}</td>
+          <td>${lastOrder}</td>
+        </tr>`;
+    });
+
+    table.style.display = 'table';
+  }
+
+  // Cargar al iniciar
+  loadProducts();
+</script>
+</body>
+</html>
