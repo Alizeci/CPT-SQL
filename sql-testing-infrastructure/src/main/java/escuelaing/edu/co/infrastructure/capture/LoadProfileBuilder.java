@@ -127,6 +127,16 @@ public class LoadProfileBuilder {
                 .average()
                 .orElse(0.0);
 
+        // sanitizedRealData: máx. 10 % de las muestras — filas reales sanitizadas
+        // capturadas por JdbcWrapper vía ResultSetCaptureHandler.
+        // Si ninguna muestra tiene datos (queries de escritura, p. ej.) la lista queda vacía.
+        int maxRealRows = Math.max(1, (int) Math.ceil(n * 0.10));
+        List<Map<String, Object>> sanitizedRealData = samples.stream()
+                .filter(r -> r.getSanitizedData() != null && !r.getSanitizedData().isEmpty())
+                .limit(maxRealRows)
+                .map(TransactionRecord::getSanitizedData)
+                .collect(Collectors.toList());
+
         return LoadProfile.QueryStats.builder()
                 .queryId(queryId)
                 .sampleCount(n)
@@ -139,6 +149,7 @@ public class LoadProfileBuilder {
                 .maxMs(max)
                 .capturedSql(capturedSql)
                 .avgRowCount(avgRowCount)
+                .sanitizedRealData(sanitizedRealData.isEmpty() ? null : sanitizedRealData)
                 .build();
     }
 

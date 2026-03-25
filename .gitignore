@@ -9,7 +9,6 @@ build/
 out/
 
 # Generated files
-load-profile.json
 
 # Compiled class file
 *.class

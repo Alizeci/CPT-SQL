@@ -44,6 +44,9 @@ public class DegradationDetector {
     @Value("${loadtest.detector.planCostTolerancePct:0.20}")
     private double planCostTolerancePct;
 
+    @Value("${loadtest.detector.sloProximityPct:0.80}")
+    private double sloProximityPct;
+
     private final QueryRegistryLoader queryRegistry;
     private final BaselineManager baselineManager;
 
@@ -77,9 +80,20 @@ public class DegradationDetector {
             QueryEntry req  = registry.get(queryId);
 
             checkReqThreshold(queryId, current, req, regressions);
+            checkSloProximity(queryId, current, req, regressions);
             checkPlanChange(queryId, current, baseline.get(queryId), req, regressions);
             checkBaselineExceeded(queryId, current, baseline.get(queryId), regressions);
         }
+
+        // Eliminar BASELINE_EXCEEDED de queries que ya tienen una regresión bloqueante.
+        // Si SLO_PROXIMITY o P95_EXCEEDED ya detectaron el problema, el warning es redundante.
+        java.util.Set<String> blockedQueries = regressions.stream()
+                .filter(r -> r.getType() != DegradationReport.RegressionType.BASELINE_EXCEEDED)
+                .map(DegradationReport.Regression::getQueryId)
+                .collect(java.util.stream.Collectors.toSet());
+
+        regressions.removeIf(r -> r.getType() == DegradationReport.RegressionType.BASELINE_EXCEEDED
+                && blockedQueries.contains(r.getQueryId()));
 
         boolean hasRegressions = !regressions.isEmpty();
         LOG.info("[DegradationDetector] " + (hasRegressions
@@ -139,6 +153,26 @@ public class DegradationDetector {
                             "allowPlanChange=false",
                             queryId, current.getPlanCost(), baseCost,
                             (int)(planCostTolerancePct * 100)))
+                    .build());
+        }
+    }
+
+    private void checkSloProximity(String queryId,
+                                    BenchmarkResult.QueryResult current,
+                                    QueryEntry req,
+                                    List<DegradationReport.Regression> out) {
+        if (req == null || !req.isHasReq()) return;
+        double slo = req.getMaxResponseTimeMs() * sloProximityPct;
+        if (current.getP95Ms() > slo && current.getP95Ms() <= req.getMaxResponseTimeMs()) {
+            out.add(DegradationReport.Regression.builder()
+                    .queryId(queryId)
+                    .type(DegradationReport.RegressionType.SLO_PROXIMITY)
+                    .observedValue(current.getP95Ms())
+                    .thresholdValue(slo)
+                    .description(String.format(
+                            "[%s] p95=%.0f ms supera el SLO interno de %.0f ms (%.0f%% del SLA=%d ms) — zona de riesgo",
+                            queryId, current.getP95Ms(), slo,
+                            sloProximityPct * 100, req.getMaxResponseTimeMs()))
                     .build());
         }
     }

@@ -1,0 +1,74 @@
+name: Benchmark — Phase 2 (captura de tráfico)
+
+# Actualiza load-profile.json capturando tráfico real del ambiente de producción.
+#
+# ARQUITECTURA:
+# Phase 2 corre en la EC2 (mismo ambiente que simula producción).
+# JdbcWrapper intercepta el 10% del tráfico, mide latencias reales y genera
+# load-profile.json con p95Ms, meanMs, callsPerMinute reales.
+# El archivo se commitea al repositorio y queda disponible para Phase 3 en CI.
+#
+# CUÁNDO CORRE:
+# - Nightly: cada noche a las 2 AM UTC (datos frescos cada 24h)
+# - Manual:  botón "Run workflow" en GitHub → Actions para pruebas
+
+on:
+  workflow_dispatch:
+    inputs:
+      simulation_secs:
+        description: 'Duración de la simulación en segundos (default: 120)'
+        required: false
+        default: '120'
+  schedule:
+    - cron: '0 2 * * *'  # 2 AM UTC cada noche
+
+jobs:
+  capturar-perfil:
+    runs-on: self-hosted
+
+    steps:
+      # ── 1. Checkout ──────────────────────────────────────────────────────────
+      - uses: actions/checkout@v4
+
+      # ── 2. Compilar ──────────────────────────────────────────────────────────
+      - name: "Fase 1 — Compilar y generar queries.json"
+        run: ./gradlew :sql-testing-demo:compileJava
+
+      # ── 3. Capturar tráfico (Phase 2) ────────────────────────────────────────
+      # EcommerceSimulator conecta al PostgreSQL local (stand-in de producción),
+      # ejecuta las queries con JdbcWrapper activo y mide latencias reales.
+      # Genera load-profile.json con p95Ms, meanMs y callsPerMinute.
+      - name: "Fase 2 — Capturar tráfico y generar load-profile.json"
+        run: ./gradlew :sql-testing-demo:runSimulator
+        env:
+          DB_URL: jdbc:postgresql://localhost:5432/ecommerce_demo
+          DB_USER: ${{ secrets.DEMO_DB_USER }}
+          DB_PASSWORD: ${{ secrets.DEMO_DB_PASSWORD }}
+
+      # ── 4. Verificar que load-profile.json tiene latencias reales ─────────────
+      # Si todas las latencias siguen en 0ms algo falló en la captura.
+      - name: Verificar latencias capturadas
+        run: |
+          P95=$(python3 -c "
+          import json, sys
+          with open('load-profile.json') as f:
+              p = json.load(f)
+          vals = [q['p95Ms'] for q in p['queries'].values()]
+          print(max(vals))
+          ")
+          echo "p95Ms máximo capturado: ${P95}ms"
+          if [ "$P95" = "0.0" ] || [ "$P95" = "0" ]; then
+            echo "❌ Todas las latencias son 0ms — la captura falló"
+            exit 1
+          fi
+          echo "✅ Latencias capturadas correctamente"
+
+      # ── 5. Commitear load-profile.json al repositorio ─────────────────────────
+      # El archivo queda versionado en Git y disponible para Phase 3 en CI.
+      - name: Registrar load-profile.json en el repositorio
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -f load-profile.json
+          git diff --staged --quiet || git commit -m "update: load-profile.json $(date -u '+%Y-%m-%d') [skip ci]"
+          git push

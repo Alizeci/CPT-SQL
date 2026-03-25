@@ -4,6 +4,7 @@ import lombok.Builder;
 import lombok.Data;
 
 import java.time.Instant;
+import java.util.Map;
 
 /**
  * Registro de una ejecución de consulta SQL capturada en producción.
@@ -37,4 +38,12 @@ public class TransactionRecord {
      * {@code 0} para SELECT o cuando no se pudo determinar.
      */
     private long rowCount;
+
+    /**
+     * Subconjunto de columnas de la fila retornada que superaron el filtro
+     * de sanitización (solo Feature columns de la lista blanca).
+     * Nunca contiene PII — cumple Ley 1581/2012.
+     * {@code null} cuando no se capturaron datos de fila (p.ej. INSERT/UPDATE).
+     */
+    private Map<String, Object> sanitizedData;
 }
