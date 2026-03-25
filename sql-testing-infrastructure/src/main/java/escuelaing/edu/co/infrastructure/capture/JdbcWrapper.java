@@ -9,7 +9,9 @@ import java.lang.reflect.Method;
 import java.lang.reflect.Proxy;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
+import java.sql.ResultSet;
 import java.time.Instant;
+import java.util.Map;
 import java.util.Set;
 import java.util.logging.Logger;
 
@@ -52,16 +54,19 @@ public class JdbcWrapper {
             "prepareStatement", "prepareCall"
     );
 
-    private final SamplingFilter samplingFilter;
-    private final MetricsBuffer metricsBuffer;
-    private final CaptureToggle captureToggle;
+    private final SamplingFilter       samplingFilter;
+    private final MetricsBuffer        metricsBuffer;
+    private final CaptureToggle        captureToggle;
+    private final SanitizationStrategy sanitizationStrategy;
 
     public JdbcWrapper(SamplingFilter samplingFilter,
                        MetricsBuffer metricsBuffer,
-                       CaptureToggle captureToggle) {
-        this.samplingFilter = samplingFilter;
-        this.metricsBuffer  = metricsBuffer;
-        this.captureToggle  = captureToggle;
+                       CaptureToggle captureToggle,
+                       SanitizationStrategy sanitizationStrategy) {
+        this.samplingFilter       = samplingFilter;
+        this.metricsBuffer        = metricsBuffer;
+        this.captureToggle        = captureToggle;
+        this.sanitizationStrategy = sanitizationStrategy;
     }
 
     // -------------------------------------------------------------------------
@@ -130,11 +135,11 @@ public class JdbcWrapper {
         private Object executeWithCapture(Method method, Object[] args) throws Throwable {
             String queryId = CaptureContext.currentQueryId();
             Instant start  = Instant.now();
+            long startNano = System.nanoTime();
 
             Object result = invokeDelegate(delegate, method, args);
 
-            long startNano   = System.nanoTime();
-            long latencyMs   = (System.nanoTime() - startNano) / 1_000_000;
+            long latencyMs = (System.nanoTime() - startNano) / 1_000_000;
 
             // Captura de filas afectadas para operaciones de escritura
             long rowCount = 0;
@@ -156,6 +161,72 @@ public class JdbcWrapper {
                         .timestamp(start)
                         .build();
                 metricsBuffer.record(record);
+
+                // Captura diferida: envuelve el ResultSet en un proxy que sanitiza
+                // la primera fila cuando el caller la lee (sin consumir el cursor).
+                if (result instanceof ResultSet) {
+                    result = wrapResultSetForCapture((ResultSet) result, record);
+                }
+            }
+
+            return result;
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // ResultSet proxy — captura diferida de fila sanitizada
+    // -------------------------------------------------------------------------
+
+    /**
+     * Envuelve un {@link ResultSet} real en un proxy que intercepta la primera
+     * llamada exitosa a {@code next()} para capturar la fila actual mediante
+     * {@link SanitizationStrategy} y almacenarla en el {@link TransactionRecord}
+     * ya encolado.
+     *
+     * <p>La captura es <em>no destructiva</em>: el caller recibe el cursor
+     * posicionado en la fila normalmente y puede leer todas las columnas sin
+     * restricciones.</p>
+     *
+     * @param real   ResultSet original devuelto por el driver JDBC
+     * @param record TransactionRecord ya registrado en el buffer (mutable vía setter)
+     */
+    private ResultSet wrapResultSetForCapture(ResultSet real, TransactionRecord record) {
+        return (ResultSet) Proxy.newProxyInstance(
+                real.getClass().getClassLoader(),
+                new Class[]{ResultSet.class},
+                new ResultSetCaptureHandler(real, record)
+        );
+    }
+
+    /** Intercepta {@code next()} para capturar la primera fila sanitizada. */
+    private class ResultSetCaptureHandler implements InvocationHandler {
+
+        private final ResultSet       delegate;
+        private final TransactionRecord record;
+        private boolean captured = false;
+
+        ResultSetCaptureHandler(ResultSet delegate, TransactionRecord record) {
+            this.delegate = delegate;
+            this.record   = record;
+        }
+
+        @Override
+        public Object invoke(Object proxy, Method method, Object[] args) throws Throwable {
+            Object result = invokeDelegate(delegate, method, args);
+
+            // Solo en la primera fila leída: sanitizar y adjuntar al record
+            if (!captured
+                    && "next".equals(method.getName())
+                    && Boolean.TRUE.equals(result)) {
+                captured = true;
+                try {
+                    Map<String, Object> sanitized = sanitizationStrategy.sanitize(delegate);
+                    if (!sanitized.isEmpty()) {
+                        record.setSanitizedData(sanitized);
+                    }
+                } catch (Exception e) {
+                    LOG.fine("[JdbcWrapper] Sanitización de fila omitida: " + e.getMessage());
+                }
             }
 
             return result;

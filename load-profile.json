@@ -1,0 +1,71 @@
+{
+  "generatedAt" : "2026-03-24T03:44:18.366147Z",
+  "totalSamples" : 1319,
+  "queries" : {
+    "createOrder" : {
+      "queryId" : "createOrder",
+      "sampleCount" : 53,
+      "meanMs" : 0.0,
+      "medianMs" : 0.0,
+      "p95Ms" : 0.0,
+      "p99Ms" : 0.0,
+      "minMs" : 0,
+      "maxMs" : 0,
+      "callsPerMinute" : 53.061905556482564,
+      "capturedSql" : "INSERT INTO orders(customer_id, status, total_amount) VALUES (?, 'PENDING', 0) RETURNING id",
+      "avgRowCount" : 0.0
+    },
+    "searchProductsByCategory" : {
+      "queryId" : "searchProductsByCategory",
+      "sampleCount" : 554,
+      "meanMs" : 0.0,
+      "medianMs" : 0.0,
+      "p95Ms" : 0.0,
+      "p99Ms" : 0.0,
+      "minMs" : 0,
+      "maxMs" : 0,
+      "callsPerMinute" : 554.647088269648,
+      "capturedSql" : "SELECT p.id, p.name, p.price, p.stock_quantity, p.rating,   (SELECT COUNT(*) FROM order_items oi WHERE oi.product_id = p.id) AS total_orders,   (SELECT AVG(oi2.quantity) FROM order_items oi2 WHERE oi2.product_id = p.id) AS avg_qty,   (SELECT MAX(o.created_at) FROM orders o JOIN order_items oi3 ON oi3.order_id = o.id WHERE oi3.product_id = p.id) AS last_order FROM products p WHERE active = true AND category = ? ORDER BY total_orders DESC LIMIT 10",
+      "avgRowCount" : 0.0
+    },
+    "updateInventory" : {
+      "queryId" : "updateInventory",
+      "sampleCount" : 53,
+      "meanMs" : 0.0,
+      "medianMs" : 0.0,
+      "p95Ms" : 0.0,
+      "p99Ms" : 0.0,
+      "minMs" : 0,
+      "maxMs" : 0,
+      "callsPerMinute" : 53.061905556482564,
+      "capturedSql" : "UPDATE products SET stock_quantity = stock_quantity + ? WHERE id = ?",
+      "avgRowCount" : 1.0
+    },
+    "getProductDetail" : {
+      "queryId" : "getProductDetail",
+      "sampleCount" : 554,
+      "meanMs" : 0.0,
+      "medianMs" : 0.0,
+      "p95Ms" : 0.0,
+      "p99Ms" : 0.0,
+      "minMs" : 0,
+      "maxMs" : 0,
+      "callsPerMinute" : 554.647088269648,
+      "capturedSql" : "SELECT id, name, category, price, stock_quantity, rating, active FROM products WHERE id = ?",
+      "avgRowCount" : 0.0
+    },
+    "checkInventory" : {
+      "queryId" : "checkInventory",
+      "sampleCount" : 105,
+      "meanMs" : 0.0,
+      "medianMs" : 0.0,
+      "p95Ms" : 0.0,
+      "p99Ms" : 0.0,
+      "minMs" : 0,
+      "maxMs" : 0,
+      "callsPerMinute" : 105.12264308359752,
+      "capturedSql" : "SELECT stock_quantity FROM products WHERE id = ?",
+      "avgRowCount" : 0.0
+    }
+  }
+}

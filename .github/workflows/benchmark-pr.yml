@@ -3,6 +3,11 @@ name: Benchmark — Commit (light)
 # Corre en cada Pull Request hacia main o develop.
 # Detecta regresiones de rendimiento antes de mergear.
 # Runner: self-hosted en EC2 t2.micro (entorno consistente y dedicado).
+#
+# ARQUITECTURA:
+# Phase 2 (captura de tráfico real) NO corre aquí. El load-profile.json
+# es generado por el workflow benchmark-phase2.yml (nightly o manual)
+# y versionado en el repositorio. Este pipeline solo ejecuta Phase 3+4.
 on:
   pull_request:
     branches: [main, develop]
@@ -27,17 +32,6 @@ jobs:
       # la instrumentación estática (Fase 1) y la captura dinámica (Fase 2).
       - name: "Fase 1 — Compilar y generar queries.json"
         run: ./gradlew :sql-testing-demo:compileJava
-
-      # ── Fase 2: simular tráfico y capturar LoadProfile ────────────────────────
-      # EcommerceSimulator conecta al PostgreSQL de la EC2 (ecommerce_demo),
-      # ejecuta las 5 queries durante 60 s con JdbcWrapper activo y genera
-      # load-profile.json con las métricas capturadas.
-      - name: "Fase 2 — Simular tráfico y capturar load-profile.json"
-        run: ./gradlew :sql-testing-demo:runSimulator
-        env:
-          DB_URL: jdbc:postgresql://localhost:5432/ecommerce_demo
-          DB_USER: ${{ secrets.DEMO_DB_USER }}
-          DB_PASSWORD: ${{ secrets.DEMO_DB_PASSWORD }}
 
       # ── Build fat JAR ─────────────────────────────────────────────────────────
       - name: Compilar artefacto ejecutable (fat JAR)
