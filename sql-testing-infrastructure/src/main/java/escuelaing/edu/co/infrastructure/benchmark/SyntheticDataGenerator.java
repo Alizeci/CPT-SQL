@@ -13,6 +13,7 @@ import java.sql.SQLException;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Map;
 import java.util.Random;
 import java.util.logging.Logger;
 import java.util.zip.CRC32;
@@ -248,6 +249,10 @@ public class SyntheticDataGenerator {
 
     private void populateEcommerce(Connection conn, LoadProfile profile) throws SQLException {
         LOG.info("[SyntheticData] Poblando schema e-commerce...");
+
+        // Fase 3 — sembrar con datos reales sanitizados (10 %) antes que los sintéticos
+        insertRealSanitizedData(conn, profile);
+
         // Calibrar filas por tabla según callsPerMinute del perfil de producción.
         // products: accedida por searchProductsByCategory, getProductDetail,
         //           checkInventory, updateInventory (~90 % del tráfico)
@@ -262,6 +267,139 @@ public class SyntheticDataGenerator {
         insertCustomers(conn, customerRows);
         insertOrders(conn, orderRows);
         LOG.info("[SyntheticData] E-commerce poblado.");
+    }
+
+    /**
+     * Siembra la BD espejo con datos reales sanitizados capturados en producción
+     * (el 10 % de la estrategia 10 % real / 90 % sintético de SynQB §3.4).
+     *
+     * <p>Para cada {@link escuelaing.edu.co.domain.model.LoadProfile.QueryStats}
+     * que contenga {@code sanitizedRealData}, detecta la tabla destino por las
+     * columnas presentes y construye sentencias INSERT completando los campos PII/ID
+     * con pseudónimos sintéticos (nunca se usan identificadores reales).</p>
+     *
+     * <p>Mapeo de columnas a tabla:</p>
+     * <ul>
+     *   <li>{@code price | stock_quantity | rating} → {@code products}</li>
+     *   <li>{@code total_amount | status} (sin columnas de products) → {@code orders}</li>
+     * </ul>
+     *
+     * <p>Si no hay datos sanitizados en el perfil, el método retorna sin error
+     * y la población sintética completa el 100 %.</p>
+     *
+     * @param conn    conexión abierta a la BD espejo (dentro de una transacción activa)
+     * @param profile perfil de carga con las muestras sanitizadas de producción
+     */
+    void insertRealSanitizedData(Connection conn, LoadProfile profile) throws SQLException {
+        if (profile == null || profile.getQueries() == null) return;
+
+        int totalInserted = 0;
+        for (LoadProfile.QueryStats stats : profile.getQueries().values()) {
+            if (stats.getSanitizedRealData() == null || stats.getSanitizedRealData().isEmpty()) continue;
+
+            for (Map<String, Object> row : stats.getSanitizedRealData()) {
+                if (row == null || row.isEmpty()) continue;
+                try {
+                    if (isProductRow(row)) {
+                        insertRealProduct(conn, row);
+                        totalInserted++;
+                    } else if (isOrderRow(row)) {
+                        insertRealOrder(conn, row);
+                        totalInserted++;
+                    }
+                    // Filas que no mapean a ninguna tabla conocida se descartan silenciosamente
+                } catch (SQLException e) {
+                    LOG.warning("[SyntheticData] Fila real descartada por conflicto: " + e.getMessage());
+                }
+            }
+        }
+        LOG.info("[SyntheticData] Filas reales sembradas: " + totalInserted);
+    }
+
+    /** Una fila mapea a products si contiene al menos una Feature column de productos. */
+    private boolean isProductRow(Map<String, Object> row) {
+        return row.containsKey("price") || row.containsKey("stock_quantity") || row.containsKey("rating");
+    }
+
+    /** Una fila mapea a orders si contiene total_amount o el status típico de una orden. */
+    private boolean isOrderRow(Map<String, Object> row) {
+        return (row.containsKey("total_amount") || row.containsKey("status"))
+                && !isProductRow(row);
+    }
+
+    private void insertRealProduct(Connection conn, Map<String, Object> row) throws SQLException {
+        String sql = """
+                INSERT INTO products (name, category, price, stock_quantity, rating, active)
+                VALUES (?, ?, ?, ?, ?, TRUE)
+                ON CONFLICT DO NOTHING
+                """;
+        String cat    = objectToString(row.get("category"),
+                CATEGORIES[rng.nextInt(CATEGORIES.length)]);
+        double price  = objectToDouble(row.get("price"),
+                clamp(gaussianNoise(80.0, 60.0), 1.0, 999.99));
+        int    stock  = objectToInt(row.get("stock_quantity"),
+                (int) clamp(gaussianNoise(100, 60), 0, 500));
+        double rating = objectToDouble(row.get("rating"),
+                clamp(gaussianNoise(3.8, 0.8), 1.0, 5.0));
+
+        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setString(1, "RealProduct-" + generateUiiPseudonym() + "-" + cat.substring(0, Math.min(3, cat.length())).toUpperCase());
+            ps.setString(2, cat);
+            ps.setBigDecimal(3, BigDecimal.valueOf(Math.round(price * 100) / 100.0));
+            ps.setInt(4, stock);
+            ps.setBigDecimal(5, BigDecimal.valueOf(Math.round(rating * 100) / 100.0));
+            ps.executeUpdate();
+        }
+    }
+
+    private void insertRealOrder(Connection conn, Map<String, Object> row) throws SQLException {
+        // customer_id se reemplaza por pseudónimo UII — nunca se usa el real
+        List<Integer> customerIds = fetchIds(conn, "customers");
+        if (customerIds.isEmpty()) return;
+
+        String[] validStatuses = {"PENDING", "PROCESSING", "DELIVERED", "CANCELLED"};
+        String status      = objectToString(row.get("status"), "DELIVERED");
+        // Validar que el status sea uno de los valores permitidos por el schema
+        boolean validStatus = false;
+        for (String s : validStatuses) { if (s.equalsIgnoreCase(status)) { validStatus = true; break; } }
+        if (!validStatus) status = "DELIVERED";
+
+        double totalAmount = objectToDouble(row.get("total_amount"),
+                clamp(gaussianNoise(150.0, 80.0), 1.0, 9999.99));
+
+        String sql = """
+                INSERT INTO orders (customer_id, status, total_amount)
+                VALUES (?, ?::order_status, ?)
+                ON CONFLICT DO NOTHING
+                """;
+        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setInt(1, customerIds.get(rng.nextInt(customerIds.size())));
+            ps.setString(2, status.toUpperCase());
+            ps.setBigDecimal(3, BigDecimal.valueOf(Math.round(totalAmount * 100) / 100.0));
+            ps.executeUpdate();
+        }
+    }
+
+    // ── Conversores defensivos para valores de un Map<String, Object> ──────────
+
+    private double objectToDouble(Object v, double fallback) {
+        if (v == null) return fallback;
+        try { return ((Number) v).doubleValue(); } catch (ClassCastException e) {
+            try { return Double.parseDouble(v.toString()); } catch (NumberFormatException ignored) {}
+        }
+        return fallback;
+    }
+
+    private int objectToInt(Object v, int fallback) {
+        if (v == null) return fallback;
+        try { return ((Number) v).intValue(); } catch (ClassCastException e) {
+            try { return Integer.parseInt(v.toString()); } catch (NumberFormatException ignored) {}
+        }
+        return fallback;
+    }
+
+    private String objectToString(Object v, String fallback) {
+        return v != null ? v.toString() : fallback;
     }
 
     /**

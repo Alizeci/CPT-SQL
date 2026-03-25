@@ -6,6 +6,7 @@ import lombok.Data;
 import lombok.NoArgsConstructor;
 
 import java.time.Instant;
+import java.util.List;
 import java.util.Map;
 
 /**
@@ -87,5 +88,15 @@ public class LoadProfile {
          * Usado en la validación de fidelidad de cardinalidad (SynQB §3.5.1).
          */
         private double avgRowCount;
+
+        /**
+         * Muestra de filas reales sanitizadas capturadas en producción (máx. 10% del total).
+         * Cada elemento es un mapa {@code columna → valor} que pasó el filtro de
+         * {@link escuelaing.edu.co.infrastructure.capture.SanitizationStrategy}.
+         * Se usa en Fase 3 para sembrar la BD espejo con datos reales antes de completar
+         * con datos sintéticos (estrategia 10% real / 90% sintético, SynQB §3.4).
+         * Nunca contiene PII — cumple Ley 1581/2012.
+         */
+        private List<Map<String, Object>> sanitizedRealData;
     }
 }
