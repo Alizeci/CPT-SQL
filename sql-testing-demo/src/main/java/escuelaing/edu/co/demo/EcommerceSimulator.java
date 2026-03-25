@@ -178,7 +178,7 @@ public class EcommerceSimulator {
                 "INSERT INTO products(name, category, price, stock_quantity, rating, active) " +
                 "VALUES(?, ?, ?, ?, ?, true) ON CONFLICT DO NOTHING")) {
 
-            for (int i = 1; i <= 200; i++) {
+            for (int i = 1; i <= 2000; i++) {
                 pc.setString(1, "Customer " + i);
                 pc.setString(2, "c" + i + "@demo.test");
                 pc.setString(3, "STANDARD");
@@ -186,7 +186,7 @@ public class EcommerceSimulator {
             }
             pc.executeBatch();
 
-            for (int i = 1; i <= 500; i++) {
+            for (int i = 1; i <= 5000; i++) {
                 String cat   = CATEGORIES[rng.nextInt(CATEGORIES.length)];
                 double price = 10 + rng.nextInt(490);
                 double rating = Math.round((1.0 + rng.nextDouble() * 4.0) * 100) / 100.0;
@@ -202,7 +202,7 @@ public class EcommerceSimulator {
         }
 
         conn.setAutoCommit(true);
-        LOG.info("[Simulator] Seed data insertada: 200 customers, 500 products.");
+        LOG.info("[Simulator] Seed data insertada: 2000 customers, 5000 products.");
     }
 
     private static String env(String key, String def) {
