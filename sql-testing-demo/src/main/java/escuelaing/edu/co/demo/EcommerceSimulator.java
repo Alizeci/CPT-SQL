@@ -7,6 +7,7 @@ import escuelaing.edu.co.domain.model.LoadProfile;
 import escuelaing.edu.co.infrastructure.analysis.QueryRegistryLoader;
 import escuelaing.edu.co.infrastructure.capture.CaptureToggle;
 import escuelaing.edu.co.infrastructure.capture.JdbcWrapper;
+import escuelaing.edu.co.infrastructure.capture.SanitizationStrategy;
 import escuelaing.edu.co.infrastructure.capture.LoadProfileBuilder;
 import escuelaing.edu.co.infrastructure.capture.MetricsBuffer;
 import escuelaing.edu.co.infrastructure.capture.SamplingFilter;
@@ -75,8 +76,9 @@ public class EcommerceSimulator {
         MetricsBuffer buffer = new MetricsBuffer();
         buffer.start();                         // equivalente a @PostConstruct
 
-        SamplingFilter filter  = new SamplingFilter(registry);
-        JdbcWrapper    wrapper = new JdbcWrapper(filter, buffer, toggle);
+        SamplingFilter       filter      = new SamplingFilter(registry);
+        SanitizationStrategy sanitization = new SanitizationStrategy();
+        JdbcWrapper          wrapper      = new JdbcWrapper(filter, buffer, toggle, sanitization);
 
         // -------------------------------------------------------------------------
         // 2. Conexión, schema y seed data

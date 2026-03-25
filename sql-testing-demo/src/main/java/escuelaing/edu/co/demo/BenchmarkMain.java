@@ -89,7 +89,9 @@ public class BenchmarkMain {
 
             // --- Clasificar regresiones: críticas (exit 1) vs advertencias (exit 0) ---
             List<DegradationReport.Regression> blocking = report.getRegressions().stream()
-                    .filter(r -> r.getType() != DegradationReport.RegressionType.BASELINE_EXCEEDED)
+                    .filter(r -> r.getType() == DegradationReport.RegressionType.P95_EXCEEDED
+                              || r.getType() == DegradationReport.RegressionType.PLAN_CHANGED
+                              || r.getType() == DegradationReport.RegressionType.SLO_PROXIMITY)
                     .collect(java.util.stream.Collectors.toList());
 
             List<DegradationReport.Regression> warnings = report.getRegressions().stream()
@@ -100,20 +102,23 @@ public class BenchmarkMain {
                 System.out.println("\n=== ADVERTENCIAS DE DEGRADACIÓN (no bloquean) ===");
                 warnings.forEach(r -> System.out.println("  " + r.getDescription()));
 
-                // Escribir benchmark-warnings.txt para que el workflow lo postee como comentario en el PR
-                try (PrintWriter pw = new PrintWriter("benchmark-warnings.txt")) {
-                    pw.println("🟡 **CPT-SQL — Advertencia de degradación**\n");
-                    warnings.forEach(r -> {
-                        BenchmarkResult.QueryResult qr = result.getQueries().get(r.getQueryId());
-                        String slaLine = qr != null
-                                ? String.format("SLA aún cumplido (%.0f%% del límite) — el merge está permitido.", qr.getSlaRiskPct())
-                                : "SLA aún cumplido — el merge está permitido.";
-                        pw.println(r.getDescription());
-                        pw.println(slaLine);
-                        pw.println();
-                    });
-                } catch (Exception e) {
-                    System.err.println("[BenchmarkMain] No se pudo escribir benchmark-warnings.txt: " + e.getMessage());
+                // Solo publicar el comentario de advertencia si no hay regresiones críticas.
+                // Si hay P95_EXCEEDED, el pipeline ya falla — el comentario sería contradictorio.
+                if (blocking.isEmpty()) {
+                    try (PrintWriter pw = new PrintWriter("benchmark-warnings.txt")) {
+                        pw.println("🟡 **CPT-SQL — Advertencia de degradación**\n");
+                        warnings.forEach(r -> {
+                            BenchmarkResult.QueryResult qr = result.getQueries().get(r.getQueryId());
+                            String slaLine = (qr != null && qr.getSlaRiskPct() < 100)
+                                    ? String.format("SLA aún cumplido (%.0f%% del límite) — el merge está permitido.", qr.getSlaRiskPct())
+                                    : "SLA aún cumplido — el merge está permitido.";
+                            pw.println(r.getDescription());
+                            pw.println(slaLine);
+                            pw.println();
+                        });
+                    } catch (Exception e) {
+                        System.err.println("[BenchmarkMain] No se pudo escribir benchmark-warnings.txt: " + e.getMessage());
+                    }
                 }
             }
 
@@ -124,15 +129,19 @@ public class BenchmarkMain {
                 System.exit(1);
             }
 
-            // --- Actualizar baseline solo post-merge (nunca en PR) ---
-            // En GitHub Actions, GITHUB_EVENT_NAME="pull_request" en PRs y "push" tras merge.
-            // Localmente la variable no existe → se actualiza para facilitar el desarrollo.
+            // --- Actualizar baseline según contexto de ejecución ---
+            // GITHUB_EVENT_NAME="pull_request" → solo escribe baseline-candidate.json (el workflow
+            // lo cachea y lo commitea tras el merge, sin volver a correr el benchmark).
+            // GITHUB_EVENT_NAME="push" o ejecución local → actualiza baseline.json directamente.
             boolean isPullRequest = "pull_request".equals(System.getenv("GITHUB_EVENT_NAME"));
-            if (isPullRequest) {
-                System.out.println("\n[BenchmarkMain] PR check — baseline.json no se modifica.");
-            } else if (result.getOverallVerdict() == BenchmarkResult.Verdict.PASS) {
-                baselineManager.save(result);
-                System.out.println("\n[BenchmarkMain] baseline.json actualizado (post-merge).");
+            if (result.getOverallVerdict() == BenchmarkResult.Verdict.PASS) {
+                if (isPullRequest) {
+                    baselineManager.saveAs(result, "baseline-candidate.json");
+                    System.out.println("\n[BenchmarkMain] PR check — baseline-candidate.json escrito para post-merge.");
+                } else {
+                    baselineManager.save(result);
+                    System.out.println("\n[BenchmarkMain] baseline.json actualizado (post-merge).");
+                }
             }
 
             System.out.println("[BenchmarkMain] Pipeline OK." + (warnings.isEmpty() ? "" : " (con advertencias de degradación)"));
