@@ -14,6 +14,8 @@ jobs:
     steps:
       # ── 1. Checkout ──────────────────────────────────────────────────────────
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2  # necesario para leer los parents del merge commit
 
       # ── 2. Identificar el SHA del PR integrado ────────────────────────────────
       # El merge commit tiene dos padres: develop (primero) y el HEAD del PR (segundo).
