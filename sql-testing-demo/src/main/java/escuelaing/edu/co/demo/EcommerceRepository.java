@@ -56,7 +56,7 @@ public class EcommerceRepository {
                      "  (SELECT AVG(oi2.quantity) FROM order_items oi2 WHERE oi2.product_id = p.id) AS avg_qty, " +
                      "  (SELECT MAX(o.created_at) FROM orders o JOIN order_items oi3 ON oi3.order_id = o.id WHERE oi3.product_id = p.id) AS last_order " +
                      "FROM products p " +
-                     "WHERE active = true AND category = ? " +
+                     "WHERE active = true AND LOWER(p.category) = LOWER(?) " +
                      "ORDER BY total_orders DESC " +
                      "LIMIT 10")) {
             ps.setString(1, category);
