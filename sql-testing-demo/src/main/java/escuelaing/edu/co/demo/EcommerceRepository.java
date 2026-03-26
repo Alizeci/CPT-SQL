@@ -54,8 +54,7 @@ public class EcommerceRepository {
                      "SELECT id, name, price, stock_quantity, rating " +
                      "FROM products " +
                      "WHERE active = true AND LOWER(category) = LOWER(?) " +
-                     "ORDER BY rating DESC, price DESC " +
-                     "LIMIT 200 OFFSET 1000")) {
+                     "ORDER BY rating DESC, price DESC")) {
             ps.setString(1, category);
             try (ResultSet rs = ps.executeQuery()) {
                 List<String> names = new ArrayList<>();
