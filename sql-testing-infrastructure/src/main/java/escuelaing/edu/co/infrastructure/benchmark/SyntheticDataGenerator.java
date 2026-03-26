@@ -421,9 +421,12 @@ public class SyntheticDataGenerator {
                     return s != null ? s.getCallsPerMinute() : 0.0;
                 }).sum();
         if (totalCpm == 0 || tableCpm == 0) return rowsPerTable;
-        // ratio ∈ (0, 1]: fracción del tráfico que va a esta tabla.
-        // ×5 para que una tabla con el 20 % del tráfico genere ~rowsPerTable filas.
-        return (int) Math.max(100, Math.round(rowsPerTable * (tableCpm / totalCpm) * 5));
+        // Siempre devolvemos rowsPerTable independientemente del tráfico,
+        // para mantener relaciones realistas entre tablas (p.ej. products:order_items ≈ 1:1).
+        // Escalar por CPM concentraría filas en tablas de lectura y dejaría
+        // tablas de escritura tan vacías que las subqueries correlacionadas
+        // encontrarían 0 filas y no generarían carga observable.
+        return rowsPerTable;
     }
 
     private static final String[] CATEGORIES = {
