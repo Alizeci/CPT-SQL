@@ -61,7 +61,7 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: baseline-candidate.json
-          key: baseline-candidate-${{ github.sha }}
+          key: baseline-candidate-${{ github.event.pull_request.head.sha }}
 
       # ── Notificación de advertencias en el PR ─────────────────────────────────
       # Si BenchmarkMain escribió benchmark-warnings.txt (BASELINE_EXCEEDED),
