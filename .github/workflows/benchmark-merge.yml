@@ -1,11 +1,13 @@
 name: Benchmark — Post-merge (actualiza baseline)
 
 # Corre cuando se integra un PR a develop o main.
-# Recupera el candidato de baseline generado en el PR check y lo registra
-# en el repositorio — sin volver a ejecutar el benchmark.
+# Re-ejecuta el benchmark con el código mergeado y actualiza baseline.json.
 on:
   push:
     branches: [main, develop]
+    paths-ignore:
+      - 'baseline.json'
+      - 'load-profile.json'
 
 jobs:
   actualizar-baseline:
@@ -14,41 +16,30 @@ jobs:
     steps:
       # ── 1. Checkout ──────────────────────────────────────────────────────────
       - uses: actions/checkout@v4
-        with:
-          fetch-depth: 2  # necesario para leer los parents del merge commit
 
-      # ── 2. Identificar el SHA del PR integrado ────────────────────────────────
-      # El merge commit tiene dos padres: develop (primero) y el HEAD del PR (segundo).
-      - name: Obtener SHA del PR integrado
-        id: pr-sha
+      # ── 2. Limpieza ───────────────────────────────────────────────────────────
+      - name: Eliminar contenedor espejo previo
+        run: docker rm -f cpt-sql-mirror || true
+
+      # ── 3. Compilar ───────────────────────────────────────────────────────────
+      - name: Compilar artefacto ejecutable (fat JAR)
+        run: ./gradlew :sql-testing-demo:bootJar
+
+      # ── 4. Ejecutar benchmark y actualizar baseline ───────────────────────────
+      # BenchmarkMain en modo post-merge actualiza baseline.json directamente.
+      - name: Ejecutar benchmark y generar nuevo baseline
         run: |
-          PR_SHA=$(git log --pretty=format:"%P" -1 | awk '{print $2}')
-          echo "sha=$PR_SHA" >> $GITHUB_OUTPUT
-          echo "SHA del PR: $PR_SHA"
+          java -jar sql-testing-demo/build/libs/sql-testing-demo.jar \
+            --loadtest.benchmark.testProfile=light \
+            --loadtest.mirror.schema.script=sql-testing-demo/src/main/resources/schema-ecommerce.sql
+        env:
+          GITHUB_SHA: ${{ github.sha }}
 
-      # ── 3. Recuperar candidato de baseline ───────────────────────────────────
-      - name: Recuperar candidato de baseline desde caché
-        id: cache-restore
-        uses: actions/cache/restore@v4
-        with:
-          path: baseline-candidate.json
-          key: baseline-candidate-${{ steps.pr-sha.outputs.sha }}
-
-      # ── 4. Registrar baseline actualizado en el repositorio ───────────────────
-      # Solo si se encontró el candidato en caché (PR check exitoso previo).
+      # ── 5. Registrar baseline actualizado en el repositorio ───────────────────
       - name: Registrar baseline actualizado en el repositorio
-        if: steps.cache-restore.outputs.cache-hit == 'true'
         run: |
-          cp baseline-candidate.json baseline.json
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add baseline.json
           git diff --staged --quiet || git commit -m "chore: actualizar baseline.json post-merge [skip ci]"
           git push
-
-      # ── 5. Aviso si no se encontró el candidato ───────────────────────────────
-      - name: Sin candidato de baseline disponible
-        if: steps.cache-restore.outputs.cache-hit != 'true'
-        run: |
-          echo "⚠️ No se encontró candidato de baseline para SHA ${{ steps.pr-sha.outputs.sha }}"
-          echo "baseline.json no fue actualizado. Puede ser un push directo sin PR."
