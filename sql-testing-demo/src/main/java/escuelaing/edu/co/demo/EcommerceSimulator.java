@@ -42,16 +42,18 @@ import java.util.logging.Logger;
  *
  * <h3>Variables de entorno</h3>
  * <pre>
- * DB_URL       (default: jdbc:postgresql://localhost:5432/ecommerce_demo)
- * DB_USER      (default: demo)
- * DB_PASSWORD  (default: demo)
+ * DB_URL          (default: jdbc:postgresql://localhost:5432/ecommerce_demo)
+ * DB_USER         (default: demo)
+ * DB_PASSWORD     (default: demo)
+ * SIMULATION_SECS (default: 60) — duración de la simulación en segundos
  * </pre>
  */
 public class EcommerceSimulator {
 
     private static final Logger LOG = Logger.getLogger(EcommerceSimulator.class.getName());
 
-    private static final int SIMULATION_SECS = 60;
+    private static final int SIMULATION_SECS =
+            Integer.parseInt(System.getenv().getOrDefault("SIMULATION_SECS", "60"));
     private static final int THINK_TIME_MS   = 100;
 
     private static final String[] CATEGORIES =

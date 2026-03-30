@@ -253,19 +253,18 @@ public class SyntheticDataGenerator {
         // Fase 3 — sembrar con datos reales sanitizados (10 %) antes que los sintéticos
         insertRealSanitizedData(conn, profile);
 
-        // Calibrar filas por tabla según callsPerMinute del perfil de producción.
-        // products: accedida por searchProductsByCategory, getProductDetail,
-        //           checkInventory, updateInventory (~90 % del tráfico)
-        // orders:   accedida por createOrder (~10 % normal, 60 % en pico)
+        // Calibrar estadísticas de Feature columns con DP Gaussiano (SynQB §3.3)
+        FeatureStats dpStats = extractDpStats(profile);
+
         int productRows  = computeTableRows(profile,
                 "searchProductsByCategory", "getProductDetail",
                 "checkInventory", "updateInventory");
         int orderRows    = computeTableRows(profile, "createOrder");
         int customerRows = Math.max(productRows / 5, 100);
 
-        insertProducts(conn, productRows);
+        insertProducts(conn, productRows, dpStats);
         insertCustomers(conn, customerRows);
-        insertOrders(conn, orderRows);
+        insertOrders(conn, orderRows, dpStats);
         LOG.info("[SyntheticData] E-commerce poblado.");
     }
 
@@ -434,7 +433,7 @@ public class SyntheticDataGenerator {
         "home", "beauty", "toys", "food"
     };
 
-    private void insertProducts(Connection conn, int count) throws SQLException {
+    private void insertProducts(Connection conn, int count, FeatureStats stats) throws SQLException {
         String sql = """
                 INSERT INTO products (name, category, price, stock_quantity, rating, active)
                 VALUES (?, ?, ?, ?, ?, TRUE)
@@ -443,9 +442,9 @@ public class SyntheticDataGenerator {
         try (PreparedStatement ps = conn.prepareStatement(sql)) {
             for (int i = 1; i <= count; i++) {
                 String cat    = CATEGORIES[rng.nextInt(CATEGORIES.length)];
-                double price  = clamp(gaussianNoise(80.0, 60.0), 1.0, 999.99);
-                int    stock  = (int) clamp(gaussianNoise(100, 60), 0, 500);
-                double rating = clamp(gaussianNoise(3.8, 0.8), 1.0, 5.0);
+                double price  = clamp(gaussianNoise(stats.meanPrice(),  stats.stdPrice()),  1.0, 999.99);
+                int    stock  = (int) clamp(gaussianNoise(stats.meanStock(), stats.stdStock()), 0, 500);
+                double rating = clamp(gaussianNoise(stats.meanRating(), stats.stdRating()), 1.0, 5.0);
 
                 ps.setString(1, "Product-" + i + "-" + cat.substring(0, 3).toUpperCase());
                 ps.setString(2, cat);
@@ -479,7 +478,7 @@ public class SyntheticDataGenerator {
         }
     }
 
-    private void insertOrders(Connection conn, int count) throws SQLException {
+    private void insertOrders(Connection conn, int count, FeatureStats stats) throws SQLException {
         List<Integer> customerIds = fetchIds(conn, "customers");
         List<Integer> productIds  = fetchIds(conn, "products");
         if (customerIds.isEmpty() || productIds.isEmpty()) return;
@@ -517,7 +516,7 @@ public class SyntheticDataGenerator {
                     for (int j = 0; j < numItems; j++) {
                         int    productId = productIds.get(rng.nextInt(productIds.size()));
                         int    qty       = 1 + rng.nextInt(5);
-                        double price     = clamp(gaussianNoise(80.0, 40.0), 1.0, 999.99);
+                        double price     = clamp(gaussianNoise(stats.meanPrice(), stats.stdPrice() * 0.5), 1.0, 999.99);
                         total += qty * price;
 
                         itemPs.setInt(1, orderId);
@@ -680,4 +679,103 @@ public class SyntheticDataGenerator {
     }
 
     private record ColumnMeta(String name, String dataType, boolean nullable, String defaultValue) {}
+
+    // -------------------------------------------------------------------------
+    // Calibración DP de Feature columns (SynQB §3.3 — DPSDG)
+    // -------------------------------------------------------------------------
+
+    /**
+     * Estadísticas de Feature columns calibradas con mecanismo Gaussiano DP.
+     * Reemplaza los valores hardcodeados del generador con distribuciones
+     * derivadas del {@code sanitizedRealData} capturado en Fase 2.
+     */
+    private record FeatureStats(
+            double meanPrice,  double stdPrice,
+            double meanRating, double stdRating,
+            double meanStock,  double stdStock) {
+
+        /** Valores por defecto cuando no hay muestras reales suficientes. */
+        static FeatureStats defaults() {
+            return new FeatureStats(80.0, 60.0, 3.8, 0.8, 100.0, 60.0);
+        }
+    }
+
+    /**
+     * Extrae estadísticas de Feature columns desde {@code sanitizedRealData} y
+     * aplica mecanismo Gaussiano con ε={@link #EPSILON_FT} (SynQB Theorem 4.6).
+     *
+     * <p>Sensibilidad global del mecanismo = rango / n, donde n es el número
+     * de muestras capturadas en Fase 2 (SamplingFilter 10 %).</p>
+     *
+     * <p>Si el perfil contiene menos de 5 muestras retorna
+     * {@link FeatureStats#defaults()} para mantener reproducibilidad.</p>
+     */
+    FeatureStats extractDpStats(LoadProfile profile) {
+        if (profile == null || profile.getQueries() == null) return FeatureStats.defaults();
+
+        List<Double> prices  = new ArrayList<>();
+        List<Double> ratings = new ArrayList<>();
+        List<Double> stocks  = new ArrayList<>();
+
+        for (LoadProfile.QueryStats stats : profile.getQueries().values()) {
+            if (stats.getSanitizedRealData() == null) continue;
+            for (Map<String, Object> row : stats.getSanitizedRealData()) {
+                if (row == null) continue;
+                if (row.containsKey("price"))
+                    prices.add(objectToDouble(row.get("price"), -1.0));
+                if (row.containsKey("rating"))
+                    ratings.add(objectToDouble(row.get("rating"), -1.0));
+                if (row.containsKey("stock_quantity"))
+                    stocks.add((double) objectToInt(row.get("stock_quantity"), -1));
+            }
+        }
+
+        prices  = prices.stream().filter(v -> v > 0).collect(java.util.stream.Collectors.toList());
+        ratings = ratings.stream().filter(v -> v > 0).collect(java.util.stream.Collectors.toList());
+        stocks  = stocks.stream().filter(v -> v >= 0).collect(java.util.stream.Collectors.toList());
+
+        if (prices.size() < 5 && ratings.size() < 5) {
+            LOG.info("[SyntheticData] Datos reales insuficientes — usando estadísticas por defecto.");
+            return FeatureStats.defaults();
+        }
+
+        int n = Math.max(prices.size(), 1);
+
+        double rawMeanPrice  = mean(prices);
+        double rawStdPrice   = std(prices, rawMeanPrice);
+        double rawMeanRating = mean(ratings);
+        double rawStdRating  = std(ratings, rawMeanRating);
+        double rawMeanStock  = mean(stocks);
+        double rawStdStock   = std(stocks, rawMeanStock);
+
+        // Sensibilidad global para la media = rango / n (Gaussian mechanism)
+        double dpMeanPrice  = clamp(gaussianNoise(rawMeanPrice,  998.0 / n), 1.0,  999.0);
+        double dpStdPrice   = clamp(gaussianNoise(rawStdPrice,    50.0 / n), 1.0,  300.0);
+        double dpMeanRating = clamp(gaussianNoise(rawMeanRating,   4.0 / n), 1.0,    5.0);
+        double dpStdRating  = clamp(gaussianNoise(rawStdRating,    0.5 / n), 0.1,    2.0);
+        double dpMeanStock  = clamp(gaussianNoise(rawMeanStock,  500.0 / n), 0.0,  500.0);
+        double dpStdStock   = clamp(gaussianNoise(rawStdStock,    50.0 / n), 1.0,  200.0);
+
+        LOG.info(String.format(
+                "[SyntheticData] DP stats calibradas (n=%d muestras, ε=%.1f): " +
+                "price=%.1f±%.1f  rating=%.2f±%.2f  stock=%.0f±%.0f",
+                n, EPSILON_FT,
+                dpMeanPrice, dpStdPrice, dpMeanRating, dpStdRating, dpMeanStock, dpStdStock));
+
+        return new FeatureStats(dpMeanPrice, dpStdPrice, dpMeanRating, dpStdRating,
+                                dpMeanStock, dpStdStock);
+    }
+
+    private double mean(List<Double> values) {
+        if (values.isEmpty()) return 0.0;
+        return values.stream().mapToDouble(Double::doubleValue).average().orElse(0.0);
+    }
+
+    private double std(List<Double> values, double mean) {
+        if (values.size() < 2) return 1.0;
+        double variance = values.stream()
+                .mapToDouble(v -> (v - mean) * (v - mean))
+                .average().orElse(1.0);
+        return Math.sqrt(variance);
+    }
 }
