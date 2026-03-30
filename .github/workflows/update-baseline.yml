@@ -1,6 +1,6 @@
-name: Benchmark — Post-merge (actualiza baseline)
+name: Baseline — Actualizar post-merge
 
-# Corre cuando se integra un PR a develop o main.
+# Corre cuando se integra un PR a main o develop.
 # Re-ejecuta el benchmark con el código mergeado y actualiza baseline.json.
 on:
   push:
@@ -26,7 +26,6 @@ jobs:
         run: ./gradlew :sql-testing-demo:bootJar
 
       # ── 4. Ejecutar benchmark y actualizar baseline ───────────────────────────
-      # BenchmarkMain en modo post-merge actualiza baseline.json directamente.
       - name: Ejecutar benchmark y generar nuevo baseline
         run: |
           java -jar sql-testing-demo/build/libs/sql-testing-demo.jar \

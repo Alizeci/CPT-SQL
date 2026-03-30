@@ -1,13 +1,12 @@
-name: Benchmark — Commit (light)
+name: Gate — Detección de degradación (PRs)
 
 # Corre en cada Pull Request hacia main o develop.
-# Detecta regresiones de rendimiento antes de mergear.
+# Detecta degradaciones de rendimiento antes de mergear.
 # Runner: self-hosted en EC2 t2.micro (entorno consistente y dedicado).
 #
 # ARQUITECTURA:
-# Phase 2 (captura de tráfico real) NO corre aquí. El load-profile.json
-# es generado por el workflow benchmark-phase2.yml (nightly o manual)
-# y versionado en el repositorio. Este pipeline solo ejecuta Phase 3+4.
+# Lee load-profile.json del repositorio (generado por capture-production-profile.yml)
+# y ejecuta Phase 3+4: benchmark en BD espejo + detección de degradaciones.
 on:
   pull_request:
     branches: [main, develop]
@@ -22,14 +21,12 @@ jobs:
 
       # ── 2. Limpieza ───────────────────────────────────────────────────────────
       # Elimina el contenedor espejo de una ejecución previa fallida.
-      # El || true evita que el step falle si el contenedor no existe.
       - name: Eliminar contenedor espejo previo
         run: docker rm -f cpt-sql-mirror || true
 
       # ── Fase 1: compilar y generar queries.json ───────────────────────────────
       # El annotation processor genera loadtest/queries.json con los @SqlQuery/@Req
-      # declarados en ProductRepository. Este archivo es el puente entre
-      # la instrumentación estática (Fase 1) y la captura dinámica (Fase 2).
+      # declarados en ProductRepository.
       - name: "Fase 1 — Compilar y generar queries.json"
         run: ./gradlew :sql-testing-demo:compileJava
 
@@ -37,15 +34,15 @@ jobs:
       - name: Compilar artefacto ejecutable (fat JAR)
         run: ./gradlew :sql-testing-demo:bootJar
 
-      # ── Fases 3 + 4: benchmark y detección de regresiones ─────────────────────
+      # ── Fases 3 + 4: benchmark y detección de degradaciones ───────────────────
       # BenchmarkMain:
       #   1. Lee load-profile.json (Fase 2)
       #   2. Levanta BD espejo en Docker (MirrorDatabaseProvisioner)
       #   3. Genera datos sintéticos (SyntheticDataGenerator — DPSDG)
       #   4. Ejecuta benchmark con TestProfile "light" (30 s, 10 TPS, UNIFORM)
       #   5. Compara contra baseline.json (DegradationDetector)
-      #   6. Sale con código 1 si detecta regresiones → falla el CI
-      - name: "Fases 3+4 — Benchmark y detección de regresiones"
+      #   6. Sale con código 1 si detecta degradaciones → falla el CI
+      - name: "Fases 3+4 — Benchmark y detección de degradaciones"
         run: |
           java -jar sql-testing-demo/build/libs/sql-testing-demo.jar \
             --loadtest.benchmark.testProfile=light \
@@ -54,8 +51,6 @@ jobs:
           GITHUB_SHA: ${{ github.sha }}
 
       # ── Guardar candidato de baseline en caché ────────────────────────────────
-      # El workflow post-merge lo recupera por SHA y actualiza baseline.json
-      # sin necesidad de volver a ejecutar el benchmark.
       - name: Guardar candidato de baseline en caché
         if: hashFiles('baseline-candidate.json') != ''
         uses: actions/cache/save@v4
@@ -64,8 +59,6 @@ jobs:
           key: baseline-candidate-${{ github.event.pull_request.head.sha }}
 
       # ── Notificación de advertencias en el PR ─────────────────────────────────
-      # Si BenchmarkMain escribió benchmark-warnings.txt (BASELINE_EXCEEDED),
-      # se publica como comentario visible en la conversación del PR.
       - name: Publicar advertencias en el PR
         if: always() && hashFiles('benchmark-warnings.txt') != ''
         run: |
@@ -77,12 +70,11 @@ jobs:
             "https://api.github.com/repos/${{ github.repository }}/issues/${{ github.event.pull_request.number }}/comments"
 
       # ── Artefactos ────────────────────────────────────────────────────────────
-      # Se suben siempre (if: always()) para poder analizar fallos.
       - name: Publicar artefactos de resultado
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: benchmark-commit-${{ github.sha }}
+          name: benchmark-degradation-${{ github.sha }}
           path: |
             load-profile.json
             baseline.json
