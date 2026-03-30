@@ -5,8 +5,9 @@ name: Gate — Detección de degradación (PRs)
 # Runner: self-hosted en EC2 t2.micro (entorno consistente y dedicado).
 #
 # ARQUITECTURA:
-# Lee load-profile.json del repositorio (generado por capture-production-profile.yml)
-# y ejecuta Phase 3+4: benchmark en BD espejo + detección de degradaciones.
+# 1. Fase 2 mini (20s): EcommerceSimulator captura el SQL del PR desde ecommerce_demo
+#    y sobreescribe load-profile.json localmente con el capturedSql del PR.
+# 2. Fases 3+4: benchmark en BD espejo con ese SQL + detección de degradaciones.
 on:
   pull_request:
     branches: [main, develop]
@@ -33,6 +34,19 @@ jobs:
       # ── Build fat JAR ─────────────────────────────────────────────────────────
       - name: Compilar artefacto ejecutable (fat JAR)
         run: ./gradlew :sql-testing-demo:bootJar
+
+      # ── Fase 2: capturar SQL del PR ───────────────────────────────────────────
+      # EcommerceSimulator corre con el código del PR durante 20 s.
+      # JdbcWrapper captura el capturedSql que trae el PR y sobreescribe
+      # load-profile.json localmente — el del repositorio no se modifica.
+      # Esto garantiza que Fase 3+4 ejecuten el SQL del PR, no el de main.
+      - name: "Fase 2 — Capturar SQL del PR"
+        run: ./gradlew :sql-testing-demo:runSimulator
+        env:
+          SIMULATION_SECS: "20"
+          DB_URL: jdbc:postgresql://localhost:5432/ecommerce_demo
+          DB_USER: ${{ secrets.DEMO_DB_USER }}
+          DB_PASSWORD: ${{ secrets.DEMO_DB_PASSWORD }}
 
       # ── Fases 3 + 4: benchmark y detección de degradaciones ───────────────────
       # BenchmarkMain:
