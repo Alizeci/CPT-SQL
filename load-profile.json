@@ -1,31 +1,31 @@
 {
-  "generatedAt" : "2026-03-29T23:58:33.838454657Z",
-  "totalSamples" : 1408,
+  "generatedAt" : "2026-03-30T04:31:21.641319401Z",
+  "totalSamples" : 1406,
   "queries" : {
     "createOrder" : {
       "queryId" : "createOrder",
       "sampleCount" : 58,
-      "meanMs" : 1.8103448275862069,
+      "meanMs" : 1.6551724137931034,
       "medianMs" : 1.0,
-      "p95Ms" : 3.0,
+      "p95Ms" : 2.0,
       "p99Ms" : 31.0,
-      "minMs" : 1,
+      "minMs" : 0,
       "maxMs" : 31,
-      "callsPerMinute" : 58.02417674030846,
+      "callsPerMinute" : 58.10943944428674,
       "capturedSql" : "INSERT INTO orders(customer_id, status, total_amount) VALUES (?, 'PENDING', 0) RETURNING id",
       "avgRowCount" : 0.0,
       "sanitizedRealData" : null
     },
     "searchProductsByCategory" : {
       "queryId" : "searchProductsByCategory",
-      "sampleCount" : 590,
-      "meanMs" : 0.0576271186440678,
+      "sampleCount" : 589,
+      "meanMs" : 0.0730050933786078,
       "medianMs" : 0.0,
       "p95Ms" : 0.0,
       "p99Ms" : 1.0,
       "minMs" : 0,
-      "maxMs" : 20,
-      "callsPerMinute" : 590.2459358065861,
+      "maxMs" : 30,
+      "callsPerMinute" : 590.1113764256015,
       "capturedSql" : "SELECT id, name, price, stock_quantity, rating FROM products WHERE active = true AND category = ? LIMIT 10",
       "avgRowCount" : 0.0,
       "sanitizedRealData" : [ {
@@ -269,34 +269,34 @@
     "updateInventory" : {
       "queryId" : "updateInventory",
       "sampleCount" : 58,
-      "meanMs" : 1.2586206896551724,
+      "meanMs" : 1.206896551724138,
       "medianMs" : 1.0,
-      "p95Ms" : 3.0,
-      "p99Ms" : 7.0,
-      "minMs" : 0,
-      "maxMs" : 7,
-      "callsPerMinute" : 58.02417674030846,
+      "p95Ms" : 2.0,
+      "p99Ms" : 8.0,
+      "minMs" : 1,
+      "maxMs" : 8,
+      "callsPerMinute" : 58.10943944428674,
       "capturedSql" : "UPDATE products SET stock_quantity = stock_quantity + ? WHERE id = ?",
       "avgRowCount" : 1.0,
       "sanitizedRealData" : null
     },
     "getProductDetail" : {
       "queryId" : "getProductDetail",
-      "sampleCount" : 590,
-      "meanMs" : 0.022033898305084745,
+      "sampleCount" : 589,
+      "meanMs" : 0.03225806451612903,
       "medianMs" : 0.0,
       "p95Ms" : 0.0,
       "p99Ms" : 1.0,
       "minMs" : 0,
-      "maxMs" : 3,
-      "callsPerMinute" : 590.2459358065861,
+      "maxMs" : 5,
+      "callsPerMinute" : 590.1113764256015,
       "capturedSql" : "SELECT id, name, category, price, stock_quantity, rating, active FROM products WHERE id = ?",
       "avgRowCount" : 0.0,
       "sanitizedRealData" : [ {
         "price" : 370.00,
         "rating" : 2.24,
         "category" : "books",
-        "stock_quantity" : 32
+        "stock_quantity" : 22
       }, {
         "price" : 192.00,
         "rating" : 2.14,
@@ -346,7 +346,7 @@
         "price" : 125.00,
         "rating" : 3.04,
         "category" : "books",
-        "stock_quantity" : 122
+        "stock_quantity" : 117
       }, {
         "price" : 220.00,
         "rating" : 2.44,
@@ -361,7 +361,7 @@
         "price" : 477.00,
         "rating" : 4.46,
         "category" : "books",
-        "stock_quantity" : 101
+        "stock_quantity" : 96
       }, {
         "price" : 329.00,
         "rating" : 2.74,
@@ -396,7 +396,7 @@
         "price" : 180.00,
         "rating" : 2.27,
         "category" : "electronics",
-        "stock_quantity" : 53
+        "stock_quantity" : 48
       }, {
         "price" : 144.00,
         "rating" : 2.53,
@@ -446,7 +446,7 @@
         "price" : 370.00,
         "rating" : 2.24,
         "category" : "books",
-        "stock_quantity" : 31
+        "stock_quantity" : 21
       }, {
         "price" : 184.00,
         "rating" : 1.61,
@@ -501,7 +501,7 @@
         "price" : 443.00,
         "rating" : 1.38,
         "category" : "home",
-        "stock_quantity" : 39
+        "stock_quantity" : 34
       }, {
         "price" : 244.00,
         "rating" : 2.91,
@@ -531,7 +531,7 @@
         "price" : 257.00,
         "rating" : 3.35,
         "category" : "home",
-        "stock_quantity" : 178
+        "stock_quantity" : 173
       }, {
         "price" : 475.00,
         "rating" : 1.10,
@@ -546,7 +546,7 @@
         "price" : 125.00,
         "rating" : 3.04,
         "category" : "books",
-        "stock_quantity" : 121
+        "stock_quantity" : 116
       }, {
         "price" : 320.00,
         "rating" : 2.96,
@@ -566,22 +566,22 @@
         "price" : 477.00,
         "rating" : 4.46,
         "category" : "books",
-        "stock_quantity" : 101
+        "stock_quantity" : 96
       }, {
         "price" : 257.00,
         "rating" : 3.35,
         "category" : "home",
-        "stock_quantity" : 177
+        "stock_quantity" : 172
       }, {
         "price" : 167.00,
         "rating" : 3.15,
         "category" : "clothing",
-        "stock_quantity" : 218
+        "stock_quantity" : 213
       }, {
         "price" : 193.00,
         "rating" : 1.82,
         "category" : "clothing",
-        "stock_quantity" : 178
+        "stock_quantity" : 173
       }, {
         "price" : 323.00,
         "rating" : 1.79,
@@ -598,13 +598,13 @@
       "p99Ms" : 1.0,
       "minMs" : 0,
       "maxMs" : 1,
-      "callsPerMinute" : 112.04668611921633,
+      "callsPerMinute" : 112.21133134069164,
       "capturedSql" : "SELECT stock_quantity FROM products WHERE id = ?",
       "avgRowCount" : 0.0,
       "sanitizedRealData" : [ {
         "stock_quantity" : 247
       }, {
-        "stock_quantity" : 101
+        "stock_quantity" : 96
       }, {
         "stock_quantity" : 129
       }, {
@@ -612,7 +612,7 @@
       }, {
         "stock_quantity" : 228
       }, {
-        "stock_quantity" : 31
+        "stock_quantity" : 21
       }, {
         "stock_quantity" : 110
       }, {
@@ -620,11 +620,11 @@
       }, {
         "stock_quantity" : 61
       }, {
-        "stock_quantity" : 121
+        "stock_quantity" : 116
       }, {
         "stock_quantity" : 176
       }, {
-        "stock_quantity" : 178
+        "stock_quantity" : 173
       } ]
     }
   }
