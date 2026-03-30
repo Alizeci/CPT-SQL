@@ -1,18 +1,17 @@
-name: Benchmark — Phase 2 (captura de tráfico)
+name: Captura — Perfil de producción (load-profile.json)
 
-# Actualiza load-profile.json capturando tráfico real del ambiente de producción.
-#
-# ARQUITECTURA:
-# Phase 2 corre en la EC2 (mismo ambiente que simula producción).
-# JdbcWrapper intercepta el 10% del tráfico, mide latencias reales y genera
-# load-profile.json con p95Ms, meanMs, callsPerMinute reales.
-# El archivo se commitea al repositorio y queda disponible para Phase 3 en CI.
+# Captura métricas y SQL reales desde main (código de producción).
+# Genera load-profile.json con p95Ms, meanMs, callsPerMinute y capturedSql.
+# El archivo se commitea al repositorio y sirve de base para los benchmarks en CI.
 #
 # CUÁNDO CORRE:
-# - Nightly: cada noche a las 2 AM UTC (datos frescos cada 24h)
-# - Manual:  botón "Run workflow" en GitHub → Actions para pruebas
+# - Al llegar código nuevo a main (push)
+# - Nightly: cada noche a las 2 AM UTC (datos frescos)
+# - Manual:  botón "Run workflow" en GitHub → Actions
 
 on:
+  push:
+    branches: [main]
   workflow_dispatch:
     inputs:
       simulation_secs:
@@ -34,11 +33,11 @@ jobs:
       - name: "Fase 1 — Compilar y generar queries.json"
         run: ./gradlew :sql-testing-demo:compileJava
 
-      # ── 3. Capturar tráfico (Phase 2) ────────────────────────────────────────
+      # ── 3. Capturar tráfico ───────────────────────────────────────────────────
       # EcommerceSimulator conecta al PostgreSQL local (stand-in de producción),
       # ejecuta las queries con JdbcWrapper activo y mide latencias reales.
-      # Genera load-profile.json con p95Ms, meanMs y callsPerMinute.
-      - name: "Fase 2 — Capturar tráfico y generar load-profile.json"
+      # Genera load-profile.json con p95Ms, meanMs, callsPerMinute y capturedSql.
+      - name: "Fase 2 — Capturar perfil de producción"
         run: ./gradlew :sql-testing-demo:runSimulator
         env:
           DB_URL: jdbc:postgresql://localhost:5432/ecommerce_demo
@@ -46,7 +45,6 @@ jobs:
           DB_PASSWORD: ${{ secrets.DEMO_DB_PASSWORD }}
 
       # ── 4. Verificar que load-profile.json tiene latencias reales ─────────────
-      # Si todas las latencias siguen en 0ms algo falló en la captura.
       - name: Verificar latencias capturadas
         run: |
           P95=$(python3 -c "
@@ -64,12 +62,11 @@ jobs:
           echo "✅ Latencias capturadas correctamente"
 
       # ── 5. Commitear load-profile.json al repositorio ─────────────────────────
-      # El archivo queda versionado en Git y disponible para Phase 3 en CI.
       - name: Registrar load-profile.json en el repositorio
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add -f load-profile.json
           git diff --staged --quiet || git commit -m "update: load-profile.json $(date -u '+%Y-%m-%d') [skip ci]"
-          git pull --rebase origin develop
+          git pull --rebase origin main
           git push
