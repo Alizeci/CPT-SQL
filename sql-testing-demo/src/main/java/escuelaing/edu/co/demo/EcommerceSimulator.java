@@ -186,7 +186,9 @@ public class EcommerceSimulator {
             }
             pc.executeBatch();
 
-            for (int i = 1; i <= 50000; i++) {
+            // 5 000 productos = 10 % del target de benchmark (50 k).
+            // Phase 3 genera los 50 k sintéticos completos usando este perfil.
+            for (int i = 1; i <= 5000; i++) {
                 String cat   = CATEGORIES[rng.nextInt(CATEGORIES.length)];
                 double price = 10 + rng.nextInt(490);
                 double rating = Math.round((1.0 + rng.nextDouble() * 4.0) * 100) / 100.0;
