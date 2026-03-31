@@ -20,7 +20,7 @@ import java.util.List;
  * asocie la latencia medida al identificador correcto sin modificar la firma
  * JDBC ni agregar dependencias al código de negocio.</p>
  *
- * <h3>Escenario de regresión demostrable</h3>
+ * <h3>Escenario de degradación demostrable</h3>
  * <p>Cambiar {@link #searchByCategory} de un SELECT simple a una subquery
  * correlacionada (por ejemplo, agregar conteo de órdenes por producto) degrada
  * el p95 por encima del SLA de 100 ms bajo carga Zipf. El {@code DegradationDetector}
@@ -44,7 +44,7 @@ public class EcommerceRepository {
      * <p><b>Baseline (fast):</b> SELECT simple con índice
      * {@code idx_products_active_category}. p95 esperado: ~10 ms.</p>
      *
-     * <p><b>Regresión típica:</b> agregar una subquery correlacionada
+     * <p><b>Degradación típica:</b> agregar una subquery correlacionada
      * {@code (SELECT COUNT(*) FROM order_items WHERE product_id = p.id)}
      * dispara el p95 por encima de 100 ms bajo carga Zipf.</p>
      */

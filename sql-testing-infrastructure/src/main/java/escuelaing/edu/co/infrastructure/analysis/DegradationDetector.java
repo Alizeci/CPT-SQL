@@ -13,7 +13,7 @@ import java.util.Map;
 import java.util.logging.Logger;
 
 /**
- * Detecta regresiones de rendimiento comparando el {@link BenchmarkResult}
+ * Detecta degradaciones de rendimiento comparando el {@link BenchmarkResult}
  * contra dos fuentes de referencia:
  *
  * <ol>
@@ -21,7 +21,7 @@ import java.util.logging.Logger;
  *       {@code allowPlanChange} declarados en el código fuente y leídos desde
  *       {@code queries.json} vía {@link QueryRegistryLoader}.</li>
  *   <li><b>Línea base histórica:</b> p95 guardado en {@code baseline.json} por
- *       el {@link BaselineManager}. Una regresión se marca cuando el p95
+ *       el {@link BaselineManager}. Una degradación se marca cuando el p95
  *       actual supera la línea base en más de {@code baselineTolerancePct} %
  *       (10 % por defecto).</li>
  * </ol>
@@ -64,13 +64,13 @@ public class DegradationDetector {
      * Evalúa el {@code result} y genera un {@link DegradationReport}.
      *
      * @param result resultado del benchmark a evaluar
-     * @return informe con la lista de regresiones (puede estar vacía)
+     * @return informe con la lista de degradaciones (puede estar vacía)
      */
     public DegradationReport detect(BenchmarkResult result) {
         Map<String, QueryEntry> registry = queryRegistry.getRegistry();
         Map<String, BenchmarkResult.QueryResult> baseline = baselineManager.load();
 
-        List<DegradationReport.Regression> regressions = new ArrayList<>();
+        List<DegradationReport.Degradation> degradations = new ArrayList<>();
 
         for (Map.Entry<String, BenchmarkResult.QueryResult> entry
                 : result.getQueries().entrySet()) {
@@ -79,33 +79,33 @@ public class DegradationDetector {
             BenchmarkResult.QueryResult current = entry.getValue();
             QueryEntry req  = registry.get(queryId);
 
-            checkReqThreshold(queryId, current, req, regressions);
-            checkSloProximity(queryId, current, req, regressions);
-            checkPlanChange(queryId, current, baseline.get(queryId), req, regressions);
-            checkBaselineExceeded(queryId, current, baseline.get(queryId), regressions);
+            checkReqThreshold(queryId, current, req, degradations);
+            checkSloProximity(queryId, current, req, degradations);
+            checkPlanChange(queryId, current, baseline.get(queryId), req, degradations);
+            checkBaselineExceeded(queryId, current, baseline.get(queryId), degradations);
         }
 
-        // Eliminar BASELINE_EXCEEDED de queries que ya tienen una regresión bloqueante.
+        // Eliminar BASELINE_EXCEEDED de queries que ya tienen una degradación bloqueante.
         // Si SLO_PROXIMITY o P95_EXCEEDED ya detectaron el problema, el warning es redundante.
-        java.util.Set<String> blockedQueries = regressions.stream()
-                .filter(r -> r.getType() != DegradationReport.RegressionType.BASELINE_EXCEEDED)
-                .map(DegradationReport.Regression::getQueryId)
+        java.util.Set<String> blockedQueries = degradations.stream()
+                .filter(r -> r.getType() != DegradationReport.DegradationType.BASELINE_EXCEEDED)
+                .map(DegradationReport.Degradation::getQueryId)
                 .collect(java.util.stream.Collectors.toSet());
 
-        regressions.removeIf(r -> r.getType() == DegradationReport.RegressionType.BASELINE_EXCEEDED
+        degradations.removeIf(r -> r.getType() == DegradationReport.DegradationType.BASELINE_EXCEEDED
                 && blockedQueries.contains(r.getQueryId()));
 
-        boolean hasRegressions = !regressions.isEmpty();
-        LOG.info("[DegradationDetector] " + (hasRegressions
-                ? regressions.size() + " regresión(es) detectada(s)."
-                : "Sin regresiones."));
+        boolean hasDegradations = !degradations.isEmpty();
+        LOG.info("[DegradationDetector] " + (hasDegradations
+                ? degradations.size() + " degradación(es) detectada(s)."
+                : "Sin degradaciones."));
 
         return DegradationReport.builder()
                 .generatedAt(Instant.now())
                 .profileName(result.getProfileName())
                 .commitSha(result.getCommitSha())
-                .hasRegressions(hasRegressions)
-                .regressions(regressions)
+                .hasDegradations(hasDegradations)
+                .degradations(degradations)
                 .build();
     }
 
@@ -116,13 +116,13 @@ public class DegradationDetector {
     private void checkReqThreshold(String queryId,
                                     BenchmarkResult.QueryResult current,
                                     QueryEntry req,
-                                    List<DegradationReport.Regression> out) {
+                                    List<DegradationReport.Degradation> degradations) {
         if (req == null || !req.isHasReq()) return;
         long threshold = req.getMaxResponseTimeMs();
         if (current.getP95Ms() > threshold) {
-            out.add(DegradationReport.Regression.builder()
+            degradations.add(DegradationReport.Degradation.builder()
                     .queryId(queryId)
-                    .type(DegradationReport.RegressionType.P95_EXCEEDED)
+                    .type(DegradationReport.DegradationType.P95_EXCEEDED)
                     .observedValue(current.getP95Ms())
                     .thresholdValue(threshold)
                     .description(String.format(
@@ -136,16 +136,16 @@ public class DegradationDetector {
                                   BenchmarkResult.QueryResult current,
                                   BenchmarkResult.QueryResult baselineResult,
                                   QueryEntry req,
-                                  List<DegradationReport.Regression> out) {
+                                  List<DegradationReport.Degradation> degradations) {
         if (req == null || req.isAllowPlanChange()) return;
         if (baselineResult == null || baselineResult.getPlanCost() == 0.0) return;
 
         double baseCost   = baselineResult.getPlanCost();
         double tolerance  = baseCost * (1 + planCostTolerancePct);
         if (current.getPlanCost() > tolerance) {
-            out.add(DegradationReport.Regression.builder()
+            degradations.add(DegradationReport.Degradation.builder()
                     .queryId(queryId)
-                    .type(DegradationReport.RegressionType.PLAN_CHANGED)
+                    .type(DegradationReport.DegradationType.PLAN_CHANGED)
                     .observedValue(current.getPlanCost())
                     .thresholdValue(tolerance)
                     .description(String.format(
@@ -160,13 +160,13 @@ public class DegradationDetector {
     private void checkSloProximity(String queryId,
                                     BenchmarkResult.QueryResult current,
                                     QueryEntry req,
-                                    List<DegradationReport.Regression> out) {
+                                    List<DegradationReport.Degradation> degradations) {
         if (req == null || !req.isHasReq()) return;
         double slo = req.getMaxResponseTimeMs() * sloProximityPct;
         if (current.getP95Ms() > slo && current.getP95Ms() <= req.getMaxResponseTimeMs()) {
-            out.add(DegradationReport.Regression.builder()
+            degradations.add(DegradationReport.Degradation.builder()
                     .queryId(queryId)
-                    .type(DegradationReport.RegressionType.SLO_PROXIMITY)
+                    .type(DegradationReport.DegradationType.SLO_PROXIMITY)
                     .observedValue(current.getP95Ms())
                     .thresholdValue(slo)
                     .description(String.format(
@@ -180,15 +180,15 @@ public class DegradationDetector {
     private void checkBaselineExceeded(String queryId,
                                         BenchmarkResult.QueryResult current,
                                         BenchmarkResult.QueryResult baselineResult,
-                                        List<DegradationReport.Regression> out) {
+                                        List<DegradationReport.Degradation> degradations) {
         if (baselineResult == null || baselineResult.getP95Ms() == 0.0) return;
 
         double baseP95   = baselineResult.getP95Ms();
         double threshold = baseP95 * (1 + baselineTolerancePct);
         if (current.getP95Ms() > threshold) {
-            out.add(DegradationReport.Regression.builder()
+            degradations.add(DegradationReport.Degradation.builder()
                     .queryId(queryId)
-                    .type(DegradationReport.RegressionType.BASELINE_EXCEEDED)
+                    .type(DegradationReport.DegradationType.BASELINE_EXCEEDED)
                     .observedValue(current.getP95Ms())
                     .thresholdValue(baseP95)
                     .description(String.format(
