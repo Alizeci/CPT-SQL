@@ -126,9 +126,10 @@ public class EcommerceRepository {
              PreparedStatement ps = conn.prepareStatement(
                      "UPDATE products " +
                      "SET stock_quantity = stock_quantity + ? " +
-                     "WHERE id = ?")) {
+                     "WHERE id = ? AND stock_quantity + ? >= 0")) {
             ps.setInt(1, delta);
             ps.setInt(2, productId);
+            ps.setInt(3, delta);
             ps.executeUpdate();
         }
     }
