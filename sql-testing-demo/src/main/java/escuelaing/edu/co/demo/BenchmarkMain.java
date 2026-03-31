@@ -22,7 +22,7 @@ import java.util.List;
  * Punto de entrada del motor de benchmark CPT-SQL (Fases 3 y 4).
  *
  * <p>Lee el {@code load-profile.json} generado por {@link EcommerceSimulator}
- * (Fase 2), ejecuta el benchmark sobre la BD espejo y detecta regresiones
+ * (Fase 2), ejecuta el benchmark sobre la BD espejo y detecta degradaciones
  * contra el {@code baseline.json} commiteado.</p>
  *
  * <h3>Uso local</h3>
@@ -39,7 +39,7 @@ import java.util.List;
  *
  * <h3>Códigos de salida</h3>
  * <ul>
- *   <li>{@code 0} — sin regresiones críticas (puede haber advertencias BASELINE_EXCEEDED).</li>
+ *   <li>{@code 0} — sin degradaciones críticas (puede haber advertencias BASELINE_EXCEEDED).</li>
  *   <li>{@code 1} — SLA violado (P95_EXCEEDED) o plan de ejecución cambiado (PLAN_CHANGED).</li>
  * </ul>
  */
@@ -72,7 +72,7 @@ public class BenchmarkMain {
             String commitSha = System.getenv("GITHUB_SHA");
             BenchmarkResult result = benchmarkRunner.run(profile, commitSha);
 
-            // --- Detección de regresiones vs baseline.json ---
+            // --- Detección de degradaciones vs baseline.json ---
             DegradationReport report = detector.detect(result);
 
             // --- Reporte de resultados ---
@@ -88,24 +88,29 @@ public class BenchmarkMain {
                         qid, qr.getP95Ms(), qr.getSlaComplianceRate(), qr.getVerdict(), risk);
             });
 
-            // --- Clasificar regresiones: críticas (exit 1) vs advertencias (exit 0) ---
-            List<DegradationReport.Regression> blocking = report.getRegressions().stream()
-                    .filter(r -> r.getType() == DegradationReport.RegressionType.P95_EXCEEDED
-                              || r.getType() == DegradationReport.RegressionType.PLAN_CHANGED
-                              || r.getType() == DegradationReport.RegressionType.SLO_PROXIMITY)
+            // --- Clasificar degradaciones: críticas (exit 1) vs advertencias (exit 0) ---
+            List<DegradationReport.Degradation> blocking = report.getDegradations().stream()
+                    .filter(r -> r.getType() == DegradationReport.DegradationType.P95_EXCEEDED
+                              || r.getType() == DegradationReport.DegradationType.PLAN_CHANGED
+                              || r.getType() == DegradationReport.DegradationType.SLO_PROXIMITY)
                     .collect(java.util.stream.Collectors.toList());
 
-            List<DegradationReport.Regression> warnings = report.getRegressions().stream()
-                    .filter(r -> r.getType() == DegradationReport.RegressionType.BASELINE_EXCEEDED)
+            List<DegradationReport.Degradation> warnings = report.getDegradations().stream()
+                    .filter(r -> r.getType() == DegradationReport.DegradationType.BASELINE_EXCEEDED)
                     .collect(java.util.stream.Collectors.toList());
 
             if (!warnings.isEmpty()) {
                 System.out.println("\n=== ADVERTENCIAS DE DEGRADACIÓN (no bloquean) ===");
                 warnings.forEach(r -> System.out.println("  " + r.getDescription()));
 
-                // Solo publicar el comentario de advertencia si no hay regresiones críticas.
-                // Si hay P95_EXCEEDED, el pipeline ya falla — el comentario sería contradictorio.
-                if (blocking.isEmpty()) {
+                // Solo publicar el comentario si no hay degradaciones críticas Y alguna query
+                // supera el 50% del SLA (error budget — Google SRE §5).
+                // Por debajo del 50% la señal es ruido — el presupuesto es amplio.
+                boolean shouldPublish = blocking.isEmpty() && warnings.stream().anyMatch(r -> {
+                    BenchmarkResult.QueryResult qr = result.getQueries().get(r.getQueryId());
+                    return qr != null && qr.getSlaRiskPct() >= 50.0;
+                });
+                if (shouldPublish) {
                     try (PrintWriter pw = new PrintWriter("benchmark-warnings.txt")) {
                         pw.println("🟡 **CPT-SQL — Advertencia de degradación**\n");
                         warnings.forEach(r -> {
@@ -124,7 +129,7 @@ public class BenchmarkMain {
             }
 
             if (!blocking.isEmpty()) {
-                System.err.println("\n=== REGRESIONES CRÍTICAS DETECTADAS ===");
+                System.err.println("\n=== DEGRADACIONES CRÍTICAS DETECTADAS ===");
                 blocking.forEach(r ->
                     System.err.println("  [FALLO] [" + r.getType() + "] " + r.getDescription()));
                 System.exit(1);

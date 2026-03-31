@@ -21,7 +21,7 @@ import java.util.logging.Logger;
  * <p>La línea base es el conjunto de métricas ({@link BenchmarkResult.QueryResult})
  * de la última ejecución aprobada, persistida en {@code baseline.json} en la
  * raíz del proyecto. El {@link DegradationDetector} la usa para detectar
- * regresiones de tipo {@code BASELINE_EXCEEDED} y {@code PLAN_CHANGED}.</p>
+ * degradaciones de tipo {@code BASELINE_EXCEEDED} y {@code PLAN_CHANGED}.</p>
  *
  * <h3>Versionado</h3>
  * <p>Cada actualización de la línea base escribe en {@code baseline.json}

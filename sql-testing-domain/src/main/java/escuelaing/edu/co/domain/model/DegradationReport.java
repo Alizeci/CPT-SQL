@@ -9,7 +9,7 @@ import java.util.List;
 /**
  * Informe de degradación generado por el {@code DegradationDetector} (Fase 3).
  *
- * <p>Detalla qué consultas fallaron, por qué tipo de regresión y cuáles
+ * <p>Detalla qué consultas fallaron, por qué tipo de degradación y cuáles
  * fueron los valores observados versus los umbrales de referencia.</p>
  *
  * <p>Es el artefacto de decisión que el pipeline CI/CD usa para bloquear
@@ -28,16 +28,16 @@ public class DegradationReport {
     /** SHA del commit evaluado. */
     private String commitSha;
 
-    /** {@code true} si existe al menos una regresión que bloquea el merge. */
-    private boolean hasRegressions;
+    /** {@code true} si existe al menos una degradación que bloquea el merge. */
+    private boolean hasDegradations;
 
-    /** Lista de regresiones detectadas (vacía cuando {@code hasRegressions == false}). */
-    private List<Regression> regressions;
+    /** Lista de degradaciones detectadas (vacía cuando {@code hasDegradations == false}). */
+    private List<Degradation> degradations;
 
     // -------------------------------------------------------------------------
 
-    /** Tipo de regresión detectada. */
-    public enum RegressionType {
+    /** Tipo de degradación detectada. */
+    public enum DegradationType {
 
         /** El p95 medido supera el {@code maxResponseTimeMs} declarado en {@code @Req}. */
         P95_EXCEEDED,
@@ -64,24 +64,24 @@ public class DegradationReport {
     }
 
     /**
-     * Detalle de una regresión individual.
+     * Detalle de una degradación individual.
      */
     @Data
     @Builder
-    public static class Regression {
+    public static class Degradation {
 
-        /** Consulta que presentó la regresión. */
+        /** Consulta que presentó la degradación. */
         private String queryId;
 
-        /** Tipo de regresión. */
-        private RegressionType type;
+        /** Tipo de degradación. */
+        private DegradationType type;
 
         /**
          * Valor observado en el benchmark.
          * <ul>
-         *   <li>{@link RegressionType#P95_EXCEEDED} → p95 medido en ms</li>
-         *   <li>{@link RegressionType#PLAN_CHANGED} → costo del nuevo plan</li>
-         *   <li>{@link RegressionType#BASELINE_EXCEEDED} → p95 medido en ms</li>
+         *   <li>{@link DegradationType#P95_EXCEEDED} → p95 medido en ms</li>
+         *   <li>{@link DegradationType#PLAN_CHANGED} → costo del nuevo plan</li>
+         *   <li>{@link DegradationType#BASELINE_EXCEEDED} → p95 medido en ms</li>
          * </ul>
          */
         private double observedValue;
@@ -89,9 +89,9 @@ public class DegradationReport {
         /**
          * Umbral que se superó.
          * <ul>
-         *   <li>{@link RegressionType#P95_EXCEEDED} → {@code maxResponseTimeMs} de {@code @Req}</li>
-         *   <li>{@link RegressionType#PLAN_CHANGED} → costo del plan de la línea base</li>
-         *   <li>{@link RegressionType#BASELINE_EXCEEDED} → p95 de la línea base × 1.10</li>
+         *   <li>{@link DegradationType#P95_EXCEEDED} → {@code maxResponseTimeMs} de {@code @Req}</li>
+         *   <li>{@link DegradationType#PLAN_CHANGED} → costo del plan de la línea base</li>
+         *   <li>{@link DegradationType#BASELINE_EXCEEDED} → p95 de la línea base × 1.10</li>
          * </ul>
          */
         private double thresholdValue;
