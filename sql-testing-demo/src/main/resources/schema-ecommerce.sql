@@ -72,7 +72,6 @@ CREATE TABLE IF NOT EXISTS order_items (
 );
 
 CREATE INDEX IF NOT EXISTS idx_order_items_order   ON order_items (order_id);
-CREATE INDEX IF NOT EXISTS idx_order_items_product ON order_items (product_id);
 
 -- -----------------------------------------------------------------------------
 -- Log de inventario (trazabilidad de cambios de stock)
