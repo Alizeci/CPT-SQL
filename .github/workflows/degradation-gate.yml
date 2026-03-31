@@ -10,7 +10,7 @@ name: Gate — Detección de degradación (PRs)
 # 2. Fases 3+4: benchmark en BD espejo con ese SQL + detección de degradaciones.
 on:
   pull_request:
-    branches: [main, develop]
+    branches: [main, develop, qa]
 
 jobs:
   benchmark:

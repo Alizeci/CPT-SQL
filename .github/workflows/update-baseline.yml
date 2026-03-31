@@ -4,16 +4,10 @@ name: Baseline — Actualizar post-merge
 # Re-ejecuta el benchmark con el código mergeado y actualiza baseline.json.
 on:
   push:
-    branches: [main, develop]
+    branches: [main, develop, qa]
     paths-ignore:
       - 'baseline.json'
       - 'load-profile.json'
-  workflow_dispatch:
-    inputs:
-      branch:
-        description: 'Rama sobre la que actualizar el baseline'
-        required: false
-        default: 'qa'
 
 jobs:
   actualizar-baseline:
