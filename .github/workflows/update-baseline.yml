@@ -8,6 +8,12 @@ on:
     paths-ignore:
       - 'baseline.json'
       - 'load-profile.json'
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: 'Rama sobre la que actualizar el baseline'
+        required: false
+        default: 'qa'
 
 jobs:
   actualizar-baseline:
