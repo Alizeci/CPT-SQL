@@ -15,10 +15,10 @@ import escuelaing.edu.co.processor.annotation.SqlQuery;
  *       y construye el {@code LoadProfile}.</li>
  *   <li>Fase 3 — el {@code BenchmarkRunner} ejecuta estas consultas sobre la BD
  *       espejo (schema {@code schema-ecommerce.sql}) bajo el TestProfile "peak"
- *       (flash sale, distribución Zipf) y detecta regresiones.</li>
+ *       (flash sale, distribución Zipf) y detecta degradaciones.</li>
  * </ol>
  *
- * <h3>Escenario de regresión demostrable</h3>
+ * <h3>Escenario de degradación demostrable</h3>
  * <p>Si un desarrollador agrega un {@code LEFT JOIN} sin índice a
  * {@code searchProductsByCategory}, el {@code DegradationDetector} detectará:</p>
  * <ul>
@@ -67,7 +67,7 @@ public class ProductRepository {
     @Req(maxResponseTimeMs = 50,
          priority = Req.Priority.HIGH,
          allowPlanChange = false,
-         description = "SLA: 50 ms p95. Acceso por PK — cualquier plan change es una regresión")
+         description = "SLA: 50 ms p95. Acceso por PK — cualquier plan change es una degradación")
     public void getProductDetail(int productId) {
         // SELECT id, name, category, price, stock_quantity, rating, active
         // FROM products
