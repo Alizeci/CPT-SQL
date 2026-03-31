@@ -1,35 +1,35 @@
 {
-  "commitSha" : "2e6f8f5190b666568fa689a8b013f3804dbec73a",
+  "commitSha" : "f727fc7ca2f9cc7d2c750033203ac9d8966c325b",
   "profileName" : "ecommerce-demo",
-  "savedAt" : "2026-03-30T22:54:45.030145411Z",
+  "savedAt" : "2026-03-31T02:02:07.140612211Z",
   "queries" : {
     "createOrder" : {
       "queryId" : "createOrder",
-      "sampleCount" : 280,
-      "meanMs" : 1.5928571428571427,
-      "medianMs" : 2.0,
+      "sampleCount" : 281,
+      "meanMs" : 1.4697508896797153,
+      "medianMs" : 1.0,
       "p95Ms" : 2.0,
       "p99Ms" : 2.0,
       "minMs" : 1,
-      "maxMs" : 20,
-      "callsPerMinute" : 560.0,
+      "maxMs" : 7,
+      "callsPerMinute" : 562.0,
       "planCost" : 0.0,
       "slaComplianceRate" : 100.0,
       "slaRiskPct" : 1.0,
       "latencyTimeSeries" : [ {
-        "elapsedMs" : 1774911264914,
+        "elapsedMs" : 1774922507107,
         "p50Ms" : 2.0,
         "p95Ms" : 2.0,
-        "p99Ms" : 20.0,
+        "p99Ms" : 7.0,
         "phaseName" : "measure"
       }, {
-        "elapsedMs" : 1774911274965,
+        "elapsedMs" : 1774922517121,
         "p50Ms" : 1.0,
         "p95Ms" : 2.0,
         "p99Ms" : 2.0,
         "phaseName" : "measure"
       }, {
-        "elapsedMs" : 1774911284957,
+        "elapsedMs" : 1774922527115,
         "p50Ms" : 1.0,
         "p95Ms" : 2.0,
         "p99Ms" : 2.0,
@@ -40,67 +40,32 @@
     },
     "updateInventory" : {
       "queryId" : "updateInventory",
-      "sampleCount" : 280,
-      "meanMs" : 1.075,
+      "sampleCount" : 281,
+      "meanMs" : 1.0782918149466192,
       "medianMs" : 1.0,
       "p95Ms" : 2.0,
       "p99Ms" : 2.0,
       "minMs" : 1,
-      "maxMs" : 4,
-      "callsPerMinute" : 560.0,
+      "maxMs" : 3,
+      "callsPerMinute" : 562.0,
       "planCost" : 0.0,
       "slaComplianceRate" : 100.0,
       "slaRiskPct" : 2.0,
       "latencyTimeSeries" : [ {
-        "elapsedMs" : 1774911264914,
+        "elapsedMs" : 1774922507107,
         "p50Ms" : 1.0,
         "p95Ms" : 2.0,
-        "p99Ms" : 4.0,
+        "p99Ms" : 3.0,
         "phaseName" : "measure"
       }, {
-        "elapsedMs" : 1774911274965,
-        "p50Ms" : 1.0,
-        "p95Ms" : 1.0,
-        "p99Ms" : 2.0,
-        "phaseName" : "measure"
-      }, {
-        "elapsedMs" : 1774911284957,
-        "p50Ms" : 1.0,
-        "p95Ms" : 1.0,
-        "p99Ms" : 2.0,
-        "phaseName" : "measure"
-      } ],
-      "verdict" : "PASS",
-      "failReason" : null
-    },
-    "searchProductsByCategory" : {
-      "queryId" : "searchProductsByCategory",
-      "sampleCount" : 280,
-      "meanMs" : 0.7607142857142857,
-      "medianMs" : 1.0,
-      "p95Ms" : 1.0,
-      "p99Ms" : 3.0,
-      "minMs" : 0,
-      "maxMs" : 10,
-      "callsPerMinute" : 560.0,
-      "planCost" : 0.0,
-      "slaComplianceRate" : 100.0,
-      "slaRiskPct" : 1.0,
-      "latencyTimeSeries" : [ {
-        "elapsedMs" : 1774911264914,
-        "p50Ms" : 1.0,
-        "p95Ms" : 1.0,
-        "p99Ms" : 10.0,
-        "phaseName" : "measure"
-      }, {
-        "elapsedMs" : 1774911274965,
+        "elapsedMs" : 1774922517121,
         "p50Ms" : 1.0,
         "p95Ms" : 1.0,
         "p99Ms" : 3.0,
         "phaseName" : "measure"
       }, {
-        "elapsedMs" : 1774911284957,
-        "p50Ms" : 0.0,
+        "elapsedMs" : 1774922527115,
+        "p50Ms" : 1.0,
         "p95Ms" : 1.0,
         "p99Ms" : 1.0,
         "phaseName" : "measure"
@@ -108,33 +73,68 @@
       "verdict" : "PASS",
       "failReason" : null
     },
-    "getProductDetail" : {
-      "queryId" : "getProductDetail",
-      "sampleCount" : 280,
-      "meanMs" : 0.11428571428571428,
-      "medianMs" : 0.0,
+    "searchProductsByCategory" : {
+      "queryId" : "searchProductsByCategory",
+      "sampleCount" : 281,
+      "meanMs" : 0.7330960854092526,
+      "medianMs" : 1.0,
       "p95Ms" : 1.0,
       "p99Ms" : 2.0,
       "minMs" : 0,
-      "maxMs" : 5,
-      "callsPerMinute" : 560.0,
+      "maxMs" : 3,
+      "callsPerMinute" : 562.0,
       "planCost" : 0.0,
       "slaComplianceRate" : 100.0,
-      "slaRiskPct" : 2.0,
+      "slaRiskPct" : 1.0,
       "latencyTimeSeries" : [ {
-        "elapsedMs" : 1774911264914,
+        "elapsedMs" : 1774922507107,
+        "p50Ms" : 1.0,
+        "p95Ms" : 2.0,
+        "p99Ms" : 3.0,
+        "phaseName" : "measure"
+      }, {
+        "elapsedMs" : 1774922517121,
+        "p50Ms" : 1.0,
+        "p95Ms" : 1.0,
+        "p99Ms" : 1.0,
+        "phaseName" : "measure"
+      }, {
+        "elapsedMs" : 1774922527115,
+        "p50Ms" : 1.0,
+        "p95Ms" : 1.0,
+        "p99Ms" : 2.0,
+        "phaseName" : "measure"
+      } ],
+      "verdict" : "PASS",
+      "failReason" : null
+    },
+    "getProductDetail" : {
+      "queryId" : "getProductDetail",
+      "sampleCount" : 281,
+      "meanMs" : 0.0498220640569395,
+      "medianMs" : 0.0,
+      "p95Ms" : 0.0,
+      "p99Ms" : 1.0,
+      "minMs" : 0,
+      "maxMs" : 2,
+      "callsPerMinute" : 562.0,
+      "planCost" : 0.0,
+      "slaComplianceRate" : 100.0,
+      "slaRiskPct" : 0.0,
+      "latencyTimeSeries" : [ {
+        "elapsedMs" : 1774922507107,
         "p50Ms" : 0.0,
         "p95Ms" : 1.0,
         "p99Ms" : 2.0,
         "phaseName" : "measure"
       }, {
-        "elapsedMs" : 1774911274965,
+        "elapsedMs" : 1774922517121,
         "p50Ms" : 0.0,
         "p95Ms" : 0.0,
-        "p99Ms" : 5.0,
+        "p99Ms" : 1.0,
         "phaseName" : "measure"
       }, {
-        "elapsedMs" : 1774911284957,
+        "elapsedMs" : 1774922527115,
         "p50Ms" : 0.0,
         "p95Ms" : 0.0,
         "p99Ms" : 1.0,
@@ -145,34 +145,34 @@
     },
     "checkInventory" : {
       "queryId" : "checkInventory",
-      "sampleCount" : 280,
-      "meanMs" : 0.09285714285714286,
+      "sampleCount" : 281,
+      "meanMs" : 0.08185053380782918,
       "medianMs" : 0.0,
-      "p95Ms" : 1.0,
+      "p95Ms" : 0.0,
       "p99Ms" : 3.0,
       "minMs" : 0,
-      "maxMs" : 4,
-      "callsPerMinute" : 560.0,
+      "maxMs" : 6,
+      "callsPerMinute" : 562.0,
       "planCost" : 0.0,
       "slaComplianceRate" : 100.0,
-      "slaRiskPct" : 3.3333333333333335,
+      "slaRiskPct" : 0.0,
       "latencyTimeSeries" : [ {
-        "elapsedMs" : 1774911264914,
+        "elapsedMs" : 1774922507107,
         "p50Ms" : 0.0,
         "p95Ms" : 1.0,
         "p99Ms" : 3.0,
         "phaseName" : "measure"
       }, {
-        "elapsedMs" : 1774911274965,
-        "p50Ms" : 0.0,
-        "p95Ms" : 1.0,
-        "p99Ms" : 4.0,
-        "phaseName" : "measure"
-      }, {
-        "elapsedMs" : 1774911284957,
+        "elapsedMs" : 1774922517121,
         "p50Ms" : 0.0,
         "p95Ms" : 0.0,
-        "p99Ms" : 1.0,
+        "p99Ms" : 3.0,
+        "phaseName" : "measure"
+      }, {
+        "elapsedMs" : 1774922527115,
+        "p50Ms" : 0.0,
+        "p95Ms" : 0.0,
+        "p99Ms" : 6.0,
         "phaseName" : "measure"
       } ],
       "verdict" : "PASS",
