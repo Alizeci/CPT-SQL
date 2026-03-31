@@ -19,12 +19,14 @@ import escuelaing.edu.co.processor.annotation.SqlQuery;
  * </ol>
  *
  * <h3>Escenario de degradación demostrable</h3>
- * <p>Si un desarrollador agrega un {@code LEFT JOIN} sin índice a
- * {@code searchProductsByCategory}, el {@code DegradationDetector} detectará:</p>
+ * <p>Un desarrollador agrega ordenamiento por popularidad a
+ * {@code searchProductsByCategory} mediante un {@code LEFT JOIN order_items}
+ * con {@code GROUP BY}. La feature es correcta funcionalmente, pero no existe
+ * un índice que cubra ese patrón de acceso. Con datos a escala de producción,
+ * el {@code DegradationDetector} detectará:</p>
  * <ul>
- *   <li>{@code PLAN_CHANGED} — el planner cambia de index scan a seq scan.</li>
- *   <li>{@code P95_EXCEEDED} — la latencia p95 supera el umbral de 100 ms
- *       durante la fase de pico (400 TPS, Zipf α=1.0).</li>
+ *   <li>{@code PLAN_CHANGED} — el planner cambia de index scan a hash aggregate.</li>
+ *   <li>{@code P95_EXCEEDED} — la latencia p95 supera el SLA de 300 ms.</li>
  * </ul>
  */
 public class ProductRepository {
@@ -43,16 +45,16 @@ public class ProductRepository {
      */
     @SqlQuery(queryId = "searchProductsByCategory",
               description = "Busca productos activos por categoría con paginación")
-    @Req(maxResponseTimeMs = 100,
+    @Req(maxResponseTimeMs = 300,
          priority = Req.Priority.HIGH,
          allowPlanChange = false,
-         description = "SLA: 100 ms p95. Plan change prohibido — índice crítico para hot spots")
+         description = "SLA: 300 ms p95. Plan change prohibido — un JOIN sin índice dispara hash aggregate sobre millones de filas")
     public void searchProductsByCategory(String category, int limit, int offset) {
         // SELECT id, name, price, stock_quantity, rating
         // FROM products
         // WHERE active = true AND category = ?
         // ORDER BY rating DESC
-        // LIMIT ? OFFSET ?
+        // LIMIT 20 OFFSET 0
     }
 
     /**

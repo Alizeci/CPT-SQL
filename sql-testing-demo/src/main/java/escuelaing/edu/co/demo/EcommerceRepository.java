@@ -21,10 +21,12 @@ import java.util.List;
  * JDBC ni agregar dependencias al código de negocio.</p>
  *
  * <h3>Escenario de degradación demostrable</h3>
- * <p>Cambiar {@link #searchByCategory} de un SELECT simple a una subquery
- * correlacionada (por ejemplo, agregar conteo de órdenes por producto) degrada
- * el p95 por encima del SLA de 100 ms bajo carga Zipf. El {@code DegradationDetector}
- * reporta {@code P95_EXCEEDED} y el pipeline de CI falla.</p>
+ * <p>La query de {@link #searchByCategory} está paginada y ordenada por rating,
+ * apoyándose en {@code idx_products_active_category}. Una feature aparentemente
+ * razonable — ordenar por popularidad agregando un {@code LEFT JOIN order_items}
+ * con {@code GROUP BY} — no tiene índice de soporte y degrada el p95 por encima
+ * del SLA de 300 ms con datos a escala de producción. El problema no es visible
+ * en entornos de desarrollo con pocos datos.</p>
  */
 public class EcommerceRepository {
 
@@ -39,14 +41,15 @@ public class EcommerceRepository {
     // -------------------------------------------------------------------------
 
     /**
-     * Busca productos activos por categoría.
+     * Busca productos activos por categoría con paginación explícita.
      *
-     * <p><b>Baseline (fast):</b> SELECT simple con índice
-     * {@code idx_products_active_category}. p95 esperado: ~10 ms.</p>
+     * <p><b>Baseline:</b> paginación estándar ordenada por rating, apoyada en
+     * {@code idx_products_active_category}. p95 esperado: &lt; 50 ms.</p>
      *
-     * <p><b>Degradación típica:</b> agregar una subquery correlacionada
-     * {@code (SELECT COUNT(*) FROM order_items WHERE product_id = p.id)}
-     * dispara el p95 por encima de 100 ms bajo carga Zipf.</p>
+     * <p><b>Degradación típica:</b> agregar un {@code LEFT JOIN order_items}
+     * con {@code GROUP BY} para ordenar por popularidad fuerza un hash aggregate
+     * sobre millones de filas sin índice de soporte — invisible en dev,
+     * crítico en producción.</p>
      */
     public List<String> searchByCategory(String category) throws SQLException {
         try (CaptureContext ignored = CaptureContext.begin("searchProductsByCategory");
@@ -54,7 +57,8 @@ public class EcommerceRepository {
                      "SELECT id, name, price, stock_quantity, rating " +
                      "FROM products " +
                      "WHERE active = true AND category = ? " +
-                     "LIMIT 10")) {
+                     "ORDER BY rating DESC " +
+                     "LIMIT 20 OFFSET 0")) {
             ps.setString(1, category);
             try (ResultSet rs = ps.executeQuery()) {
                 List<String> names = new ArrayList<>();
