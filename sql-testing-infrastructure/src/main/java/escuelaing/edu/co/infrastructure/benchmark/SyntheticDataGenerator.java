@@ -44,6 +44,7 @@ import java.util.zip.CRC32;
  * loadtest.synthetic.rowsPerTable=500
  * loadtest.synthetic.batchSize=200
  * loadtest.synthetic.seed=42
+ * loadtest.synthetic.minOrderItemsPerProduct=20
  * </pre>
  */
 @Component
@@ -78,6 +79,14 @@ public class SyntheticDataGenerator {
 
     @Value("${loadtest.synthetic.seed:42}")
     private long seed;
+
+    /**
+     * Mínimo de filas en {@code order_items} garantizado por producto.
+     * Asegura que subqueries correlacionadas siempre encuentren volumen suficiente
+     * para generar carga observable, independientemente del entorno de CI.
+     */
+    @Value("${loadtest.synthetic.minOrderItemsPerProduct:20}")
+    private int minOrderItemsPerProduct;
 
     private Random rng = new Random(42);
 
@@ -265,6 +274,7 @@ public class SyntheticDataGenerator {
         insertProducts(conn, productRows, dpStats);
         insertCustomers(conn, customerRows);
         insertOrders(conn, orderRows, dpStats);
+        ensureMinOrderItemsPerProduct(conn, dpStats);
         LOG.info("[SyntheticData] E-commerce poblado.");
     }
 
@@ -541,6 +551,54 @@ public class SyntheticDataGenerator {
                 }
             }
         }
+    }
+
+    /**
+     * Garantiza al menos {@code minOrderItemsPerProduct} filas en {@code order_items}
+     * por cada producto, insertando las filas faltantes sobre órdenes ya existentes.
+     *
+     * <p>Esto asegura que subqueries correlacionadas del tipo
+     * {@code SELECT COUNT(*) FROM order_items WHERE product_id = p.id}
+     * siempre encuentren volumen suficiente para generar carga observable,
+     * independientemente del entorno de CI.</p>
+     */
+    private void ensureMinOrderItemsPerProduct(Connection conn, FeatureStats stats) throws SQLException {
+        List<Integer> productIds = fetchIds(conn, "products");
+        List<Integer> orderIds   = fetchIds(conn, "orders");
+        if (productIds.isEmpty() || orderIds.isEmpty()) return;
+
+        java.util.Map<Integer, Integer> currentCounts = new java.util.HashMap<>();
+        try (PreparedStatement ps = conn.prepareStatement(
+                "SELECT product_id, COUNT(*) FROM order_items GROUP BY product_id");
+             ResultSet rs = ps.executeQuery()) {
+            while (rs.next()) currentCounts.put(rs.getInt(1), rs.getInt(2));
+        }
+
+        String itemSql = """
+                INSERT INTO order_items (order_id, product_id, quantity, unit_price)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT DO NOTHING
+                """;
+        int totalInserted = 0;
+        try (PreparedStatement ps = conn.prepareStatement(itemSql)) {
+            for (int productId : productIds) {
+                int needed = minOrderItemsPerProduct - currentCounts.getOrDefault(productId, 0);
+                for (int i = 0; i < needed; i++) {
+                    int    orderId = orderIds.get(rng.nextInt(orderIds.size()));
+                    int    qty     = 1 + rng.nextInt(3);
+                    double price   = clamp(gaussianNoise(stats.meanPrice(), stats.stdPrice() * 0.5), 1.0, 999.99);
+                    ps.setInt(1, orderId);
+                    ps.setInt(2, productId);
+                    ps.setInt(3, qty);
+                    ps.setBigDecimal(4, BigDecimal.valueOf(Math.round(price * 100) / 100.0));
+                    ps.addBatch();
+                    if (++totalInserted % batchSize == 0) ps.executeBatch();
+                }
+            }
+            ps.executeBatch();
+        }
+        LOG.info("[SyntheticData] order_items completados: mínimo " + minOrderItemsPerProduct
+                + " por producto (" + totalInserted + " filas adicionales).");
     }
 
     // -------------------------------------------------------------------------
