@@ -184,17 +184,27 @@ public class TestProfile {
     /**
      * Perfil ligero para pre-test por commit (Nivel 1 de CI/CD).
      *
-     * <p>Carga constante baja durante 30 s. Retorno rápido compatible con
-     * un ciclo de integración continua (Laaber et al., 2024).</p>
+     * <p>Warm-up de 10 s (muestras descartadas) seguido de ventana de medición
+     * de 30 s. El warm-up calienta el buffer cache de PostgreSQL para que la
+     * fase de medición parta de un estado estable, reduciendo la variabilidad
+     * entre ejecuciones en entornos de CI (Laaber et al., 2024).</p>
      */
     public static TestProfile light() {
         return TestProfile.builder()
                 .name("light")
-                .description("Pre-test por commit: carga constante baja (30 s)")
+                .description("Pre-test por commit: warm-up 10 s + medición 30 s")
                 .executionMode(ExecutionMode.CLOSED_LOOP)
                 .accessDistribution(AccessDistribution.UNIFORM)
                 .thinkTimeMs(150)
                 .phases(List.of(
+                        Phase.builder()
+                                .name("warmup")
+                                .targetTps(10)
+                                .durationSecs(10)
+                                .mixturePreset(MixturePreset.DEFAULT)
+                                .throughputFunction(ThroughputFunction.STEP)
+                                .measurement(false)
+                                .build(),
                         Phase.builder()
                                 .name("measure")
                                 .targetTps(10)
