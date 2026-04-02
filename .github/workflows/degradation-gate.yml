@@ -25,6 +25,11 @@ jobs:
       - name: Eliminar contenedor espejo previo
         run: docker rm -f cpt-sql-mirror || true
 
+      - name: Limpiar disco (imágenes y volúmenes Docker sin uso)
+        run: |
+          docker image prune -f
+          docker volume prune -f
+
       # ── Fase 1: compilar y generar queries.json ───────────────────────────────
       # El annotation processor genera loadtest/queries.json con los @SqlQuery/@Req
       # declarados en ProductRepository.

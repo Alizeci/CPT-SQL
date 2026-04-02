@@ -21,6 +21,11 @@ jobs:
       - name: Eliminar contenedor espejo previo
         run: docker rm -f cpt-sql-mirror || true
 
+      - name: Limpiar disco (imágenes y volúmenes Docker sin uso)
+        run: |
+          docker image prune -f
+          docker volume prune -f
+
       # ── 3. Compilar ───────────────────────────────────────────────────────────
       - name: Compilar artefacto ejecutable (fat JAR)
         run: ./gradlew :sql-testing-demo:bootJar
