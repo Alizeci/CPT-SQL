@@ -55,11 +55,11 @@ public class EcommerceRepository {
         try (CaptureContext ignored = CaptureContext.begin("searchProductsByCategory");
              PreparedStatement ps = conn.prepareStatement(
                      "SELECT p.id, p.name, p.price, p.stock_quantity, p.rating, " +
-                     "       COUNT(oi.id) AS total_sold " +
+                     "       (SELECT COALESCE(SUM(oi.quantity), 0) " +
+                     "        FROM order_items oi " +
+                     "        WHERE oi.product_id = p.id) AS total_sold " +
                      "FROM products p " +
-                     "LEFT JOIN order_items oi ON oi.product_id = p.id " +
                      "WHERE p.active = true AND p.category = ? " +
-                     "GROUP BY p.id, p.name, p.price, p.stock_quantity, p.rating " +
                      "ORDER BY total_sold DESC " +
                      "LIMIT 20 OFFSET 0")) {
             ps.setString(1, category);
