@@ -129,7 +129,7 @@ public class MirrorDatabaseProvisioner {
                     "-e", "POSTGRES_USER=" + user,
                     "-e", "POSTGRES_PASSWORD=" + password,
                     "-p", port + ":5432",
-                    "-d", "postgres:15")
+                    "-d", "postgres:17")
                     .redirectErrorStream(true)
                     .start();
             int exit = run.waitFor();
