@@ -5,6 +5,7 @@ import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import escuelaing.edu.co.domain.model.BenchmarkResult;
 import escuelaing.edu.co.domain.model.DegradationReport;
 import escuelaing.edu.co.domain.model.LoadProfile;
+import escuelaing.edu.co.domain.model.validation.ValidationReport;
 import escuelaing.edu.co.infrastructure.analysis.BaselineManager;
 import escuelaing.edu.co.infrastructure.analysis.DegradationDetector;
 import escuelaing.edu.co.infrastructure.benchmark.BenchmarkRunner;
@@ -67,6 +68,20 @@ public class BenchmarkMain {
             System.out.println("[BenchmarkMain] Perfil cargado: "
                     + profile.getTotalSamples() + " muestras, "
                     + profile.getQueries().size() + " queries.");
+
+            // --- Validación de fidelidad de síntesis (SynQB) ---
+            // Genera VALIDATION_REPORT.json en build/validation/ sin bloquear el benchmark.
+            // Compara p95 real (load-profile.json) vs p95 sintético (BD espejo) y verifica
+            // reproducibilidad byte-identical con mismo seed.
+            try {
+                ValidationReport validationReport =
+                        benchmarkRunner.performValidation(profile);
+                benchmarkRunner.persistValidationReport(validationReport);
+                System.out.println("[BenchmarkMain] VALIDATION_REPORT.json generado — "
+                        + validationReport.getValidationStatus());
+            } catch (Exception e) {
+                System.err.println("[BenchmarkMain] Validación de fidelidad omitida: " + e.getMessage());
+            }
 
             // --- Fase 3 + Fase 4: benchmark y persistencia ---
             String commitSha = System.getenv("GITHUB_SHA");

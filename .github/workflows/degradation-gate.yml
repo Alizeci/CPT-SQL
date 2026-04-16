@@ -98,3 +98,4 @@ jobs:
             load-profile.json
             baseline.json
             build/results/
+            build/validation/
