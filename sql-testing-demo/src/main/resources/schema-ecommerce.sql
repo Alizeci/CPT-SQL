@@ -72,6 +72,7 @@ CREATE TABLE IF NOT EXISTS order_items (
 );
 
 CREATE INDEX IF NOT EXISTS idx_order_items_order   ON order_items (order_id);
+-- idx_order_items_product eliminado intencionalmente en esta rama (escenario de degradación).
 
 -- -----------------------------------------------------------------------------
 -- Log de inventario (trazabilidad de cambios de stock)

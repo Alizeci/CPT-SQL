@@ -137,19 +137,29 @@ public class JdbcWrapper {
             Instant start  = Instant.now();
             long startNano = System.nanoTime();
 
-            Object result = invokeDelegate(delegate, method, args);
+            // Ejecutar la query; capturar el SQL incluso si falla (ej. statement_timeout).
+            // El capturedSql es esencial para que Fases 3+4 benchmarkeen el SQL del PR.
+            Throwable executionError = null;
+            Object result = null;
+            try {
+                result = invokeDelegate(delegate, method, args);
+            } catch (Throwable t) {
+                executionError = t;
+            }
 
             long latencyMs = (System.nanoTime() - startNano) / 1_000_000;
 
             // Captura de filas afectadas para operaciones de escritura
             long rowCount = 0;
-            String mn = method.getName();
-            if ("executeUpdate".equals(mn) && result instanceof Integer) {
-                rowCount = (Integer) result;
-            } else if ("executeLargeUpdate".equals(mn) && result instanceof Long) {
-                rowCount = (Long) result;
-            } else if ("execute".equals(mn) && result instanceof Boolean && !(Boolean) result) {
-                try { rowCount = delegate.getUpdateCount(); } catch (Exception ignored) {}
+            if (executionError == null) {
+                String mn = method.getName();
+                if ("executeUpdate".equals(mn) && result instanceof Integer) {
+                    rowCount = (Integer) result;
+                } else if ("executeLargeUpdate".equals(mn) && result instanceof Long) {
+                    rowCount = (Long) result;
+                } else if ("execute".equals(mn) && result instanceof Boolean && !(Boolean) result) {
+                    try { rowCount = delegate.getUpdateCount(); } catch (Exception ignored) {}
+                }
             }
 
             if (queryId != null && samplingFilter.shouldRecord(queryId, latencyMs)) {
@@ -164,11 +174,12 @@ public class JdbcWrapper {
 
                 // Captura diferida: envuelve el ResultSet en un proxy que sanitiza
                 // la primera fila cuando el caller la lee (sin consumir el cursor).
-                if (result instanceof ResultSet) {
+                if (executionError == null && result instanceof ResultSet) {
                     result = wrapResultSetForCapture((ResultSet) result, record);
                 }
             }
 
+            if (executionError != null) throw executionError;
             return result;
         }
     }
