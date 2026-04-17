@@ -90,6 +90,17 @@ public class EcommerceSimulator {
             applySchema(raw);
             insertSeedData(raw);
 
+            // Statement timeout por query: evita que una query degradada del PR
+            // bloquee el proceso completo. El propósito de Fase 2 es capturar el
+            // SQL text — la latencia real se mide en Fases 3+4 sobre el mirror DB.
+            // JdbcWrapper registra el SQL incluso cuando la ejecución falla.
+            int stmtTimeoutMs = Integer.parseInt(
+                    System.getenv().getOrDefault("SIMULATOR_STMT_TIMEOUT_MS", "8000"));
+            try (Statement st = raw.createStatement()) {
+                st.execute("SET statement_timeout = '" + stmtTimeoutMs + "'");
+            }
+            LOG.info("[Simulator] statement_timeout=" + stmtTimeoutMs + "ms configurado.");
+
             Connection conn = wrapper.wrap(raw);
             EcommerceRepository repo = new EcommerceRepository(conn);
             Random rng = new Random(42);
@@ -110,17 +121,31 @@ public class EcommerceSimulator {
                 int    customerId = rng.nextInt(200) + 1;
                 String category   = CATEGORIES[rng.nextInt(CATEGORIES.length)];
 
-                repo.searchByCategory(category);
-                repo.getProductDetail(productId);
+                try { repo.searchByCategory(category); }
+                catch (SQLException e) {
+                    LOG.warning("[Simulator] searchByCategory cancelada (" + e.getMessage() + ")");
+                }
+
+                try { repo.getProductDetail(productId); }
+                catch (SQLException e) {
+                    LOG.fine("[Simulator] getProductDetail: " + e.getMessage());
+                }
 
                 if (rng.nextInt(5) == 0) {
-                    repo.checkInventory(productId);
+                    try { repo.checkInventory(productId); }
+                    catch (SQLException e) {
+                        LOG.fine("[Simulator] checkInventory: " + e.getMessage());
+                    }
                 }
 
                 if (rng.nextInt(10) == 0) {
-                    int orderId = repo.createOrder(customerId);
-                    if (orderId > 0) {
-                        repo.updateInventory(productId, -1);
+                    try {
+                        int orderId = repo.createOrder(customerId);
+                        if (orderId > 0) {
+                            repo.updateInventory(productId, -1);
+                        }
+                    } catch (SQLException e) {
+                        LOG.fine("[Simulator] createOrder/updateInventory: " + e.getMessage());
                     }
                 }
 
