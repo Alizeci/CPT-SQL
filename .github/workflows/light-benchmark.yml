@@ -20,7 +20,7 @@ on:
 # Evita que una cancelación mid-job deje el pipeline en estado inconsistente.
 concurrency:
   group: light-benchmark-${{ github.event.pull_request.number }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   benchmark:
