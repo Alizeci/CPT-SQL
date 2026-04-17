@@ -1,8 +1,12 @@
-name: Gate — Detección de degradación (PRs)
+name: Light Benchmark — Detección de degradación en PRs
 
-# Corre en cada Pull Request hacia main o develop.
-# Detecta degradaciones de rendimiento antes de mergear.
-# Runner: self-hosted en EC2 t2.micro (entorno consistente y dedicado).
+# Corre en cada Pull Request hacia main, develop o qa.
+# Detecta degradaciones de rendimiento introducidas por el código del PR
+# antes de mergear. Bloquea el merge si detecta P95_EXCEEDED o SLO_PROXIMITY.
+# Runner: self-hosted (VM Ubuntu dedicada — entorno consistente y reproducible).
+#
+# Perfil: light — warmup 10s + medición 30s, 10 TPS, 10k rows sintéticos.
+# Baseline: baseline.json (independiente del nightly).
 #
 # ARQUITECTURA:
 # 1. Fase 2 mini (20s): EcommerceSimulator captura el SQL del PR desde ecommerce_demo
@@ -11,6 +15,12 @@ name: Gate — Detección de degradación (PRs)
 on:
   pull_request:
     branches: [main, develop, qa]
+
+# Cancela runs anteriores del mismo PR al recibir un nuevo push.
+# Evita que una cancelación mid-job deje el pipeline en estado inconsistente.
+concurrency:
+  group: light-benchmark-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
 
 jobs:
   benchmark:
@@ -65,6 +75,8 @@ jobs:
         run: |
           java -jar sql-testing-demo/build/libs/sql-testing-demo.jar \
             --loadtest.benchmark.testProfile=light \
+            --loadtest.synthetic.rowsPerTable=10000 \
+            --loadtest.baseline.path=baseline.json \
             --loadtest.mirror.schema.script=sql-testing-demo/src/main/resources/schema-ecommerce.sql
         env:
           GITHUB_SHA: ${{ github.sha }}

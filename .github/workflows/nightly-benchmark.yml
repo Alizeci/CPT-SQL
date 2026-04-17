@@ -1,0 +1,72 @@
+name: Nightly — Benchmark de volumen (detección por crecimiento de datos)
+
+# Corre cada noche en develop/qa con volumen alto de datos sintéticos.
+# Detecta degradaciones que solo emergen con crecimiento orgánico del volumen
+# — invisibles en el gate de PRs con 10k rows pero críticas en producción.
+#
+# Escenario 2 del director: "una query que rinde bien hoy con 10,000 filas
+# empieza a degradar cuando la tabla alcanza 500,000 filas".
+#
+# Perfil: normal (ramp-up 30s + medición 120s, 100 TPS)
+# Volumen: 200,000 filas por tabla (~4M order_items)
+# Baseline: baseline-nightly.json (independiente del baseline de PRs)
+on:
+  schedule:
+    - cron: '0 7 * * *'   # 2:00 AM COT (UTC-5) = 07:00 UTC
+  workflow_dispatch:       # permite ejecución manual para pruebas
+
+jobs:
+  nightly:
+    runs-on: self-hosted
+
+    steps:
+      # ── 1. Checkout ──────────────────────────────────────────────────────────
+      - uses: actions/checkout@v4
+
+      # ── 2. Limpieza ───────────────────────────────────────────────────────────
+      - name: Eliminar contenedor espejo previo
+        run: docker rm -f cpt-sql-mirror || true
+
+      - name: Limpiar disco (imágenes y volúmenes Docker sin uso)
+        run: |
+          docker image prune -f
+          docker volume prune -f
+
+      # ── 3. Compilar ───────────────────────────────────────────────────────────
+      - name: Compilar artefacto ejecutable (fat JAR)
+        run: ./gradlew :sql-testing-demo:bootJar
+
+      # ── 4. Benchmark con volumen alto ─────────────────────────────────────────
+      # Perfil "normal": ramp-up 30s + medición 120s, 100 TPS.
+      # 200k rows × minOrderItemsPerProduct=20 ≈ 4M order_items en mirror DB.
+      # Detecta degradaciones de complejidad cuadrática o planes sub-óptimos
+      # que con 10k rows pasan desapercibidos.
+      - name: "Benchmark nightly — volumen alto"
+        run: |
+          java -jar sql-testing-demo/build/libs/sql-testing-demo.jar \
+            --loadtest.benchmark.testProfile=normal \
+            --loadtest.synthetic.rowsPerTable=200000 \
+            --loadtest.baseline.path=baseline-nightly.json \
+            --loadtest.mirror.schema.script=sql-testing-demo/src/main/resources/schema-ecommerce.sql
+        env:
+          GITHUB_SHA: ${{ github.sha }}
+
+      # ── 5. Actualizar baseline nightly si el resultado es PASS ────────────────
+      - name: Actualizar baseline-nightly.json en el repositorio
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add baseline-nightly.json
+          git diff --staged --quiet || git commit -m "chore: actualizar baseline-nightly.json [skip ci]"
+          git push
+
+      # ── Artefactos ────────────────────────────────────────────────────────────
+      - name: Publicar artefactos de resultado
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nightly-benchmark-${{ github.sha }}
+          path: |
+            baseline-nightly.json
+            build/results/
+            build/validation/
