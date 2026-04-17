@@ -35,6 +35,8 @@ jobs:
         run: |
           java -jar sql-testing-demo/build/libs/sql-testing-demo.jar \
             --loadtest.benchmark.testProfile=light \
+            --loadtest.synthetic.rowsPerTable=10000 \
+            --loadtest.baseline.path=baseline.json \
             --loadtest.mirror.schema.script=sql-testing-demo/src/main/resources/schema-ecommerce.sql
         env:
           GITHUB_SHA: ${{ github.sha }}
