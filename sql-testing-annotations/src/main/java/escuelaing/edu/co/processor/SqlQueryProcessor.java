@@ -13,9 +13,18 @@ import escuelaing.edu.co.processor.annotation.SqlQuery;
 import java.io.IOException;
 import java.io.Writer;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 
+/**
+ * CPT-SQL Phase 1: extracts {@link SqlQuery} + {@link Req} contracts at compile time
+ * and serializes them into {@code loadtest/queries.json}.
+ *
+ * <p>Class-level {@code @Req} applies to all {@code @SqlQuery} methods in the class;
+ * method-level {@code @Req} takes precedence. A duplicate {@code queryId} or a write
+ * failure halt compilation with {@code ERROR}.</p>
+ */
 @SupportedAnnotationTypes({
     "escuelaing.edu.co.processor.annotation.SqlQuery",
     "escuelaing.edu.co.processor.annotation.Req"
@@ -30,38 +39,66 @@ public class SqlQueryProcessor extends AbstractProcessor {
         if (roundEnv.processingOver()) return false;
 
         List<String> entries = new ArrayList<>();
+        Set<String> seenQueryIds = new HashSet<>();
 
         for (Element element : roundEnv.getElementsAnnotatedWith(SqlQuery.class)) {
             if (element.getKind() != ElementKind.METHOD) continue;
 
             ExecutableElement method = (ExecutableElement) element;
             TypeElement enclosingClass = (TypeElement) method.getEnclosingElement();
-
             SqlQuery sqlQuery = method.getAnnotation(SqlQuery.class);
 
-            // @Req: método tiene precedencia sobre clase
+            // Duplicate queryId — ambiguous contract, halts compilation
+            String queryId = sqlQuery.queryId();
+            if (!seenQueryIds.add(queryId)) {
+                processingEnv.getMessager().printMessage(
+                    Diagnostic.Kind.ERROR,
+                    "[LoadTest] Duplicate queryId: '" + queryId + "'. " +
+                    "Each @SqlQuery method must have a unique queryId - " +
+                    "pipeline artifacts (queries.json, baseline.json, load-profile.json) " +
+                    "use queryId as the traceability key.",
+                    method
+                );
+                continue;
+            }
+
+            // @Req: method level takes precedence over class level
             Req req = method.getAnnotation(Req.class);
             if (req == null) req = enclosingClass.getAnnotation(Req.class);
 
-            String entry = buildJsonEntry(
-                sqlQuery.queryId(),
+            // Incomplete contract — detector will skip P95_EXCEEDED and SLO_PROXIMITY
+            if (req == null) {
+                processingEnv.getMessager().printMessage(
+                    Diagnostic.Kind.WARNING,
+                    "[LoadTest] " + enclosingClass.getSimpleName() +
+                    "#" + method.getSimpleName() +
+                    " (queryId='" + queryId + "')" +
+                    " has @SqlQuery without @Req - performance contract is not declared." +
+                    " DegradationDetector will skip P95_EXCEEDED and SLO_PROXIMITY for this query.",
+                    method
+                );
+            }
+
+            entries.add(buildJsonEntry(
+                queryId,
                 enclosingClass.getQualifiedName().toString(),
                 method.getSimpleName().toString(),
                 sqlQuery.description(),
                 req
-            );
-
-            entries.add(entry);
+            ));
 
             processingEnv.getMessager().printMessage(
                 Diagnostic.Kind.NOTE,
-                "[LoadTest] Procesado: " + enclosingClass.getSimpleName() +
+                "[LoadTest] Processed: " + enclosingClass.getSimpleName() +
                 "#" + method.getSimpleName() +
-                " | queryId=" + sqlQuery.queryId()
+                " | queryId=" + queryId +
+                (req != null ? " | sla=" + req.maxResponseTimeMs() + "ms" : " | sla=no contract")
             );
         }
 
-        if (!entries.isEmpty()) writeJson(entries);
+        if (!entries.isEmpty()) {
+            writeJson(entries);
+        }
         return true;
     }
 
@@ -70,15 +107,15 @@ public class SqlQueryProcessor extends AbstractProcessor {
                                    Req req) {
         boolean hasReq = req != null;
         return "    {\n" +
-            "      \"queryId\": \"" + queryId + "\",\n" +
-            "      \"className\": \"" + className + "\",\n" +
-            "      \"methodName\": \"" + methodName + "\",\n" +
-            "      \"queryDescription\": \"" + description + "\",\n" +
-            "      \"hasReq\": " + hasReq + ",\n" +
-            "      \"maxResponseTimeMs\": " + (hasReq ? req.maxResponseTimeMs() : -1) + ",\n" +
-            "      \"priority\": \"" + (hasReq ? req.priority().name() : "NONE") + "\",\n" +
-            "      \"reqDescription\": \"" + (hasReq ? req.description() : "") + "\",\n" +
-            "      \"allowPlanChange\": " + (!hasReq || req.allowPlanChange()) + "\n" +
+            "      \"queryId\": "          + jsonString(queryId)      + ",\n" +
+            "      \"className\": "        + jsonString(className)    + ",\n" +
+            "      \"methodName\": "       + jsonString(methodName)   + ",\n" +
+            "      \"queryDescription\": " + jsonString(description)  + ",\n" +
+            "      \"hasReq\": "           + hasReq                   + ",\n" +
+            "      \"maxResponseTimeMs\": "+ (hasReq ? req.maxResponseTimeMs() : -1) + ",\n" +
+            "      \"priority\": "         + jsonString(hasReq ? req.priority().name() : "NONE") + ",\n" +
+            "      \"reqDescription\": "   + jsonString(hasReq ? req.description() : "") + ",\n" +
+            "      \"allowPlanChange\": "  + (!hasReq || req.allowPlanChange()) + "\n" +
             "    }";
     }
 
@@ -90,7 +127,7 @@ public class SqlQueryProcessor extends AbstractProcessor {
             );
             try (Writer writer = resource.openWriter()) {
                 writer.write("{\n");
-                writer.write("  \"generatedAt\": \"" + java.time.Instant.now() + "\",\n");
+                writer.write("  \"generatedAt\": " + jsonString(java.time.Instant.now().toString()) + ",\n");
                 writer.write("  \"totalQueries\": " + entries.size() + ",\n");
                 writer.write("  \"queries\": [\n");
                 for (int i = 0; i < entries.size(); i++) {
@@ -102,13 +139,26 @@ public class SqlQueryProcessor extends AbstractProcessor {
             }
             processingEnv.getMessager().printMessage(
                 Diagnostic.Kind.NOTE,
-                "[LoadTest] queries.json generado en: " + resource.toUri()
+                "[LoadTest] queries.json written to: " + resource.toUri()
             );
         } catch (IOException e) {
             processingEnv.getMessager().printMessage(
                 Diagnostic.Kind.ERROR,
-                "[LoadTest] Error escribiendo queries.json: " + e.getMessage()
+                "[LoadTest] Failed to write queries.json: " + e.getMessage() +
+                " - pipeline phases 2-4 will not be able to run."
             );
         }
+    }
+
+    /** Escapes {@code value} for safe use as a JSON string. */
+    private static String jsonString(String value) {
+        if (value == null) return "\"\"";
+        return "\"" + value
+            .replace("\\", "\\\\")
+            .replace("\"", "\\\"")
+            .replace("\n", "\\n")
+            .replace("\r", "\\r")
+            .replace("\t", "\\t")
+            + "\"";
     }
 }
