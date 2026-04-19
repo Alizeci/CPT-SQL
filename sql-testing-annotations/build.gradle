@@ -1,3 +1,8 @@
 dependencies {
-    // ya no depende de domain
+    testImplementation 'com.google.testing.compile:compile-testing:0.21.0'
+    testImplementation 'junit:junit:4.13.2'
+}
+
+test {
+    useJUnit()
 }
