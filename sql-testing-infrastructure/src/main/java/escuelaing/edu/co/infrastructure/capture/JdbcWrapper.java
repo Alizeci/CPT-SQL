@@ -16,40 +16,26 @@ import java.util.Set;
 import java.util.logging.Logger;
 
 /**
- * Decorador JDBC que intercepta la creación de {@link PreparedStatement}s y
- * mide la latencia de cada ejecución.
+ * JDBC decorator that intercepts {@link PreparedStatement} execution to measure
+ * latency and capture sanitized row data.
  *
- * <h3>Funcionamiento</h3>
- * <ol>
- *   <li>El desarrollador envuelve su {@link Connection} real con
- *       {@link #wrap(Connection)}.</li>
- *   <li>Cada llamada a {@code prepareStatement(...)} devuelve un proxy que
- *       intercepta los métodos {@code execute}, {@code executeQuery} y
- *       {@code executeUpdate}.</li>
- *   <li>Antes y después de la ejecución real se mide la latencia.</li>
- *   <li>{@link SamplingFilter} decide si la muestra se registra.</li>
- *   <li>Si procede, se construye un {@link TransactionRecord} y se encola en
- *       el {@link MetricsBuffer}.</li>
- * </ol>
+ * <p>Wrap a real {@link Connection} with {@link #wrap(Connection)}; from that point,
+ * every {@code prepareStatement} / {@code prepareCall} returns a proxy that measures
+ * execution time, applies {@link SamplingFilter}, and enqueues a
+ * {@link TransactionRecord} in {@link MetricsBuffer}.</p>
  *
- * <p>Se usa {@link java.lang.reflect.Proxy} para delegar automáticamente todos
- * los métodos que no requieren instrumentación, evitando implementar los ~50
- * métodos de las interfaces {@link Connection} y {@link PreparedStatement}.</p>
- *
- * <p>El {@code queryId} activo se obtiene de {@link CaptureContext#currentQueryId()}.
- * Si no hay contexto abierto, la captura se omite.</p>
+ * <p>The active {@code queryId} is read from {@link CaptureContext#currentQueryId()}.
+ * If no context is open, the call is passed through without instrumentation.</p>
  */
 @Component
 public class JdbcWrapper {
 
     private static final Logger LOG = Logger.getLogger(JdbcWrapper.class.getName());
 
-    /** Nombres de métodos de PreparedStatement que ejecutan la consulta. */
     private static final Set<String> EXECUTE_METHODS = Set.of(
             "execute", "executeQuery", "executeUpdate", "executeLargeUpdate"
     );
 
-    /** Nombres de métodos de Connection que crean un PreparedStatement. */
     private static final Set<String> PREPARE_METHODS = Set.of(
             "prepareStatement", "prepareCall"
     );
@@ -69,15 +55,13 @@ public class JdbcWrapper {
         this.sanitizationStrategy = sanitizationStrategy;
     }
 
-    // -------------------------------------------------------------------------
-    // API pública
-    // -------------------------------------------------------------------------
+    // Public API
 
     /**
-     * Envuelve una {@link Connection} real con el wrapper de captura.
+     * Wraps a real {@link Connection} with the capture decorator.
      *
-     * @param real la conexión JDBC original
-     * @return una {@link Connection} proxy instrumentada
+     * @param real the original JDBC connection
+     * @return an instrumented {@link Connection} proxy
      */
     public Connection wrap(Connection real) {
         return (Connection) Proxy.newProxyInstance(
@@ -87,11 +71,8 @@ public class JdbcWrapper {
         );
     }
 
-    // -------------------------------------------------------------------------
-    // Handlers internos
-    // -------------------------------------------------------------------------
+    // Proxy handlers
 
-    /** Intercepta las llamadas a {@link Connection}. */
     private class ConnectionHandler implements InvocationHandler {
 
         private final Connection delegate;
@@ -113,7 +94,6 @@ public class JdbcWrapper {
         }
     }
 
-    /** Intercepta las llamadas a {@link PreparedStatement}. */
     private class StatementHandler implements InvocationHandler {
 
         private final PreparedStatement delegate;
@@ -137,8 +117,8 @@ public class JdbcWrapper {
             Instant start  = Instant.now();
             long startNano = System.nanoTime();
 
-            // Ejecutar la query; capturar el SQL incluso si falla (ej. statement_timeout).
-            // El capturedSql es esencial para que Fases 3+4 benchmarkeen el SQL del PR.
+            // Execute the query and capture SQL even on failure (e.g. statement_timeout).
+            // The captured SQL is required for phases 3+4 to benchmark the PR's query.
             Throwable executionError = null;
             Object result = null;
             try {
@@ -149,7 +129,6 @@ public class JdbcWrapper {
 
             long latencyMs = (System.nanoTime() - startNano) / 1_000_000;
 
-            // Captura de filas afectadas para operaciones de escritura
             long rowCount = 0;
             if (executionError == null) {
                 String mn = method.getName();
@@ -172,8 +151,6 @@ public class JdbcWrapper {
                         .build();
                 metricsBuffer.record(record);
 
-                // Captura diferida: envuelve el ResultSet en un proxy que sanitiza
-                // la primera fila cuando el caller la lee (sin consumir el cursor).
                 if (executionError == null && result instanceof ResultSet) {
                     result = wrapResultSetForCapture((ResultSet) result, record);
                 }
@@ -184,22 +161,10 @@ public class JdbcWrapper {
         }
     }
 
-    // -------------------------------------------------------------------------
-    // ResultSet proxy — captura diferida de fila sanitizada
-    // -------------------------------------------------------------------------
-
     /**
-     * Envuelve un {@link ResultSet} real en un proxy que intercepta la primera
-     * llamada exitosa a {@code next()} para capturar la fila actual mediante
-     * {@link SanitizationStrategy} y almacenarla en el {@link TransactionRecord}
-     * ya encolado.
-     *
-     * <p>La captura es <em>no destructiva</em>: el caller recibe el cursor
-     * posicionado en la fila normalmente y puede leer todas las columnas sin
-     * restricciones.</p>
-     *
-     * @param real   ResultSet original devuelto por el driver JDBC
-     * @param record TransactionRecord ya registrado en el buffer (mutable vía setter)
+     * Wraps a {@link ResultSet} to capture and sanitize the first row via
+     * {@link SanitizationStrategy} on the first successful {@code next()} call.
+     * The caller receives the cursor positioned normally and can read all columns.
      */
     private ResultSet wrapResultSetForCapture(ResultSet real, TransactionRecord record) {
         return (ResultSet) Proxy.newProxyInstance(
@@ -209,10 +174,9 @@ public class JdbcWrapper {
         );
     }
 
-    /** Intercepta {@code next()} para capturar la primera fila sanitizada. */
     private class ResultSetCaptureHandler implements InvocationHandler {
 
-        private final ResultSet       delegate;
+        private final ResultSet        delegate;
         private final TransactionRecord record;
         private boolean captured = false;
 
@@ -225,7 +189,6 @@ public class JdbcWrapper {
         public Object invoke(Object proxy, Method method, Object[] args) throws Throwable {
             Object result = invokeDelegate(delegate, method, args);
 
-            // Solo en la primera fila leída: sanitizar y adjuntar al record
             if (!captured
                     && "next".equals(method.getName())
                     && Boolean.TRUE.equals(result)) {
@@ -236,17 +199,13 @@ public class JdbcWrapper {
                         record.setSanitizedData(sanitized);
                     }
                 } catch (Exception e) {
-                    LOG.fine("[JdbcWrapper] Sanitización de fila omitida: " + e.getMessage());
+                    LOG.fine("[JdbcWrapper] Row sanitization skipped: " + e.getMessage());
                 }
             }
 
             return result;
         }
     }
-
-    // -------------------------------------------------------------------------
-    // Helpers
-    // -------------------------------------------------------------------------
 
     private PreparedStatement wrapStatement(PreparedStatement real, String sql) {
         return (PreparedStatement) Proxy.newProxyInstance(

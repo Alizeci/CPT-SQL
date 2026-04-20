@@ -7,19 +7,19 @@ import org.springframework.stereotype.Component;
 import java.util.Random;
 
 /**
- * Decide si una ejecución de consulta debe registrarse como
+ * Decides whether a query execution should be recorded as a
  * {@link escuelaing.edu.co.domain.model.TransactionRecord}.
  *
- * <h3>Reglas de muestreo — en orden de precedencia</h3>
+ * <h3>Sampling rules (evaluated in order)</h3>
  * <ol>
- *   <li><b>priority == HIGH</b> → siempre capturar.</li>
- *   <li><b>latencia &gt; maxResponseTimeMs</b> declarado en {@code @Req}
- *       → siempre capturar (anomalía de rendimiento).</li>
- *   <li>Ninguna regla anterior → capturar con probabilidad 0.10 (10 %).</li>
+ *   <li>{@code priority == HIGH} → always record.</li>
+ *   <li>Latency exceeds {@code maxResponseTimeMs} declared in {@code @Req}
+ *       → always record (performance anomaly).</li>
+ *   <li>None of the above → record with 10 % probability.</li>
  * </ol>
  *
- * <p>Cuando el {@code queryId} no existe en el registro (código legacy sin
- * {@code @SqlQuery}), se aplica únicamente la regla probabilística.</p>
+ * <p>If the {@code queryId} is not in the registry (legacy code without
+ * {@code @SqlQuery}), only the probabilistic rule applies.</p>
  */
 @Component
 public class SamplingFilter {
@@ -35,13 +35,10 @@ public class SamplingFilter {
     }
 
     /**
-     * Evalúa si la ejecución identificada por {@code queryId} con la latencia
-     * medida debe registrarse.
+     * Returns {@code true} if the execution should be recorded.
      *
-     * @param queryId   identificador de la consulta (puede ser {@code null}
-     *                  si no hay {@link CaptureContext} activo)
-     * @param latencyMs latencia medida por el wrapper JDBC, en milisegundos
-     * @return {@code true} si la transacción debe registrarse
+     * @param queryId   query identifier from {@link CaptureContext}; {@code null} skips capture
+     * @param latencyMs latency measured by the JDBC wrapper, in milliseconds
      */
     public boolean shouldRecord(String queryId, long latencyMs) {
         if (queryId == null) {
@@ -51,18 +48,14 @@ public class SamplingFilter {
         QueryEntry entry = registryLoader.get(queryId);
 
         if (entry != null) {
-            // Regla 1: prioridad HIGH → siempre capturar
             if ("HIGH".equalsIgnoreCase(entry.getPriority())) {
                 return true;
             }
-
-            // Regla 2: anomalía de rendimiento → siempre capturar
             if (entry.isHasReq() && latencyMs > entry.getMaxResponseTimeMs()) {
                 return true;
             }
         }
 
-        // Regla 3: muestreo probabilístico al 10 %
         return random.nextDouble() < DEFAULT_SAMPLE_RATE;
     }
 }

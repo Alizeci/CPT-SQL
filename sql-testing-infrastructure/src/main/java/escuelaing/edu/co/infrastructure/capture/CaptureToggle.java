@@ -13,70 +13,43 @@ import org.springframework.web.bind.annotation.RestController;
 import java.util.Map;
 
 /**
- * Feature flag que habilita o deshabilita la captura de métricas en caliente,
- * sin requerir un redespliegue de la aplicación.
+ * Feature flag that enables or disables metric capture at runtime without redeployment.
  *
- * <h3>Mecanismos de control</h3>
- * <ul>
- *   <li><b>JMX</b> — a través del MBean {@code escuelaing.edu.co:type=CaptureToggle}.
- *       Se puede operar desde JConsole o cualquier cliente JMX.</li>
- *   <li><b>REST</b> — endpoint HTTP integrado en la misma clase (inner
- *       {@link Controller}) para control desde CI/CD o dashboards.</li>
- * </ul>
- *
- * <p>El flag es {@code volatile} para garantizar visibilidad entre hilos sin
- * necesidad de sincronización explícita.</p>
+ * <p>Exposed via JMX (MBean {@code escuelaing.edu.co:type=CaptureToggle}) and a
+ * built-in REST endpoint for control from CI/CD or dashboards. The flag is
+ * {@code volatile} to ensure cross-thread visibility without explicit synchronization.</p>
  */
 @Component
 @ManagedResource(
         objectName = "escuelaing.edu.co:type=CaptureToggle",
-        description = "Habilita o deshabilita la captura de métricas JDBC en caliente"
+        description = "Enables or disables JDBC metric capture at runtime"
 )
 public class CaptureToggle {
 
     private volatile boolean enabled = true;
 
-    // -------------------------------------------------------------------------
-    // API interna — usada por JdbcWrapper
-    // -------------------------------------------------------------------------
-
-    /** Retorna {@code true} si la captura está habilitada. */
-    @ManagedAttribute(description = "Estado actual del flag de captura")
+    @ManagedAttribute(description = "Current capture flag state")
     public boolean isEnabled() {
         return enabled;
     }
 
-    // -------------------------------------------------------------------------
-    // Control vía JMX
-    // -------------------------------------------------------------------------
-
-    @ManagedAttribute(description = "Habilita o deshabilita la captura de métricas")
+    @ManagedAttribute(description = "Enable or disable metric capture")
     public void setEnabled(boolean enabled) {
         this.enabled = enabled;
     }
 
-    @ManagedOperation(description = "Habilita la captura de métricas")
+    @ManagedOperation(description = "Enable metric capture")
     public void enable() {
         this.enabled = true;
     }
 
-    @ManagedOperation(description = "Deshabilita la captura de métricas")
+    @ManagedOperation(description = "Disable metric capture")
     public void disable() {
         this.enabled = false;
     }
 
-    // -------------------------------------------------------------------------
-    // Control vía REST — endpoint anidado
-    // -------------------------------------------------------------------------
+    // REST control — GET /loadtest/capture, PUT /loadtest/capture?enabled=
 
-    /**
-     * Controlador REST que expone el toggle de captura.
-     *
-     * <ul>
-     *   <li>{@code GET  /loadtest/capture} — devuelve el estado actual.</li>
-     *   <li>{@code PUT  /loadtest/capture?enabled=true|false} — cambia el estado.</li>
-     * </ul>
-     */
     @RestController
     @RequestMapping("/loadtest/capture")
     public class Controller {

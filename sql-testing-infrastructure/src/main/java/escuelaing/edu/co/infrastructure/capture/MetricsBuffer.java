@@ -3,6 +3,7 @@ package escuelaing.edu.co.infrastructure.capture;
 import escuelaing.edu.co.domain.model.TransactionRecord;
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
@@ -14,32 +15,43 @@ import java.util.concurrent.TimeUnit;
 import java.util.logging.Logger;
 
 /**
- * Buffer en memoria para {@link TransactionRecord}s capturados por el wrapper JDBC.
+ * In-memory buffer for {@link TransactionRecord}s captured by the JDBC wrapper.
  *
- * <h3>Diseño</h3>
+ * <h3>Design</h3>
  * <ul>
- *   <li>Usa un {@link LinkedBlockingQueue} con capacidad máxima de 10 000 registros
- *       para acotar el uso de memoria en picos de carga.</li>
- *   <li>Un hilo de escritura dedicado ({@code metrics-flusher}) vacía la cola en
- *       lotes cada {@value #FLUSH_INTERVAL_MS} ms, minimizando la contención con
- *       los hilos de aplicación.</li>
- *   <li>Si la cola está llena, el nuevo registro se descarta (política
- *       <i>drop-on-full</i>) para no bloquear a los hilos de aplicación.</li>
- *   <li>Los registros descargados se acumulan en {@code flushed} (lista protegida
- *       con {@code synchronized}) hasta que {@link LoadProfileBuilder} los consume.</li>
+ *   <li>Uses a {@link LinkedBlockingQueue} with a configurable maximum capacity
+ *       to bound memory usage under load spikes.</li>
+ *   <li>A dedicated flusher thread ({@code metrics-flusher}) drains the queue in
+ *       batches every {@code loadtest.buffer.flushIntervalMs} ms, minimising
+ *       contention with application threads.</li>
+ *   <li>If the queue is full, the incoming record is dropped (drop-on-full policy)
+ *       to avoid blocking application threads.</li>
+ *   <li>Flushed records accumulate in {@code flushed} (a {@code synchronized} list)
+ *       until {@link LoadProfileBuilder} consumes them.</li>
  * </ul>
+ *
+ * <h3>Configuration (application.properties)</h3>
+ * <pre>
+ * loadtest.buffer.queueCapacity=10000
+ * loadtest.buffer.flushIntervalMs=500
+ * loadtest.buffer.batchSize=200
+ * </pre>
  */
 @Component
 public class MetricsBuffer {
 
     private static final Logger LOG = Logger.getLogger(MetricsBuffer.class.getName());
 
-    private static final int    QUEUE_CAPACITY    = 10_000;
-    private static final long   FLUSH_INTERVAL_MS = 500L;
-    private static final int    BATCH_SIZE        = 200;
+    @Value("${loadtest.buffer.queueCapacity:10000}")
+    private int queueCapacity;
 
-    private final BlockingQueue<TransactionRecord> queue =
-            new LinkedBlockingQueue<>(QUEUE_CAPACITY);
+    @Value("${loadtest.buffer.flushIntervalMs:500}")
+    private long flushIntervalMs;
+
+    @Value("${loadtest.buffer.batchSize:200}")
+    private int batchSize;
+
+    private BlockingQueue<TransactionRecord> queue;
 
     private final List<TransactionRecord> flushed =
             Collections.synchronizedList(new ArrayList<>());
@@ -47,17 +59,15 @@ public class MetricsBuffer {
     private volatile boolean running = false;
     private Thread flusherThread;
 
-    // -------------------------------------------------------------------------
-    // Ciclo de vida del bean
-    // -------------------------------------------------------------------------
-
     @PostConstruct
     public void start() {
+        queue = new LinkedBlockingQueue<>(queueCapacity);
         running = true;
         flusherThread = new Thread(this::flushLoop, "metrics-flusher");
         flusherThread.setDaemon(true);
         flusherThread.start();
-        LOG.info("[MetricsBuffer] Hilo de escritura iniciado.");
+        LOG.info("[MetricsBuffer] Flusher thread started (capacity=" + queueCapacity
+                + ", flushIntervalMs=" + flushIntervalMs + ", batchSize=" + batchSize + ").");
     }
 
     @PreDestroy
@@ -67,32 +77,29 @@ public class MetricsBuffer {
             flusherThread.interrupt();
         }
         drainBatch();
-        LOG.info("[MetricsBuffer] Detenido. Total registros en flushed: " + flushed.size());
+        LOG.info("[MetricsBuffer] Stopped. Total records in flushed: " + flushed.size());
     }
 
-    // -------------------------------------------------------------------------
-    // API pública
-    // -------------------------------------------------------------------------
+    // Public API
 
     /**
-     * Encola un {@link TransactionRecord}. No bloquea: si la cola está llena
-     * el registro se descarta y se registra una advertencia.
+     * Enqueues a {@link TransactionRecord}. Non-blocking: if the queue is full
+     * the record is dropped and a warning is logged.
      *
-     * @param record registro a encolar
+     * @param record record to enqueue
      */
     public void record(TransactionRecord record) {
         boolean accepted = queue.offer(record);
         if (!accepted) {
-            LOG.warning("[MetricsBuffer] Cola llena — registro descartado para queryId="
-                    + record.getQueryId());
+            LOG.warning("[MetricsBuffer] Queue full — record dropped for queryId=" + record.getQueryId());
         }
     }
 
     /**
-     * Devuelve y elimina todos los registros actualmente en {@code flushed}.
-     * Llamado por {@link LoadProfileBuilder} para construir el perfil de carga.
+     * Drains and returns all records currently in {@code flushed}.
+     * Called by {@link LoadProfileBuilder} to build the load profile.
      *
-     * @return lista de registros (puede estar vacía)
+     * @return list of records (may be empty)
      */
     public List<TransactionRecord> drainFlushed() {
         synchronized (flushed) {
@@ -102,24 +109,20 @@ public class MetricsBuffer {
         }
     }
 
-    /** Número de registros actualmente en la cola de captura (pendientes de flush). */
+    /** Number of records currently in the capture queue (pending flush). */
     public int pendingCount() {
         return queue.size();
     }
 
-    /** Número de registros ya descargados y disponibles para el LoadProfileBuilder. */
+    /** Number of records already flushed and available to LoadProfileBuilder. */
     public int flushedCount() {
         return flushed.size();
     }
 
-    // -------------------------------------------------------------------------
-    // Lógica interna del hilo de escritura
-    // -------------------------------------------------------------------------
-
     private void flushLoop() {
         while (running) {
             try {
-                TimeUnit.MILLISECONDS.sleep(FLUSH_INTERVAL_MS);
+                TimeUnit.MILLISECONDS.sleep(flushIntervalMs);
                 drainBatch();
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
@@ -128,11 +131,11 @@ public class MetricsBuffer {
     }
 
     private void drainBatch() {
-        List<TransactionRecord> batch = new ArrayList<>(BATCH_SIZE);
-        queue.drainTo(batch, BATCH_SIZE);
+        List<TransactionRecord> batch = new ArrayList<>(batchSize);
+        queue.drainTo(batch, batchSize);
         if (!batch.isEmpty()) {
             flushed.addAll(batch);
-            LOG.fine("[MetricsBuffer] Flush: " + batch.size() + " registros. Total acumulado: " + flushed.size());
+            LOG.fine("[MetricsBuffer] Flushed " + batch.size() + " records. Total accumulated: " + flushed.size());
         }
     }
 }

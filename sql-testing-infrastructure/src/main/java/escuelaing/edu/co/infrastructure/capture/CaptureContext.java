@@ -1,24 +1,19 @@
 package escuelaing.edu.co.infrastructure.capture;
 
 /**
- * Transporta el {@code queryId} activo al hilo de ejecución actual mediante
- * un {@link ThreadLocal}, permitiendo que el wrapper JDBC conozca la consulta
- * que está siendo ejecutada sin requerir parámetros adicionales en la firma
- * de los métodos JDBC.
+ * Propagates the active {@code queryId} to the current thread via a
+ * {@link ThreadLocal}, allowing {@link JdbcWrapper} to associate each JDBC
+ * execution with a query without modifying method signatures.
  *
- * <h3>Uso</h3>
+ * <p>Always use inside a {@code try-with-resources} block to guarantee cleanup:</p>
  * <pre>{@code
  * try (CaptureContext ctx = CaptureContext.begin("getUserOrders")) {
  *     return jdbcTemplate.query(SQL, rowMapper);
  * }
  * }</pre>
  *
- * <p>El bloque {@code try-with-resources} garantiza que el {@code ThreadLocal}
- * se limpie al salir del scope, evitando fugas de memoria en pools de hilos.</p>
- *
- * <p>Si el wrapper JDBC se ejecuta fuera de un {@code CaptureContext} (por
- * ejemplo en código legacy sin anotar), {@link #currentQueryId()} devuelve
- * {@code null} y el wrapper omite la captura.</p>
+ * <p>If {@link JdbcWrapper} executes outside a {@code CaptureContext},
+ * {@link #currentQueryId()} returns {@code null} and capture is skipped.</p>
  */
 public final class CaptureContext implements AutoCloseable {
 
@@ -29,28 +24,25 @@ public final class CaptureContext implements AutoCloseable {
     }
 
     /**
-     * Abre un contexto de captura para el {@code queryId} dado y lo asocia
-     * al hilo actual. Debe usarse siempre en un bloque {@code try-with-resources}.
+     * Opens a capture context for the given {@code queryId} on the current thread.
+     * Must always be used in a {@code try-with-resources} block.
      *
-     * @param queryId identificador declarado en {@code @SqlQuery#queryId}
-     * @return el contexto abierto (se cierra automáticamente al salir del try)
+     * @param queryId identifier declared in {@code @SqlQuery#queryId}
+     * @return the open context (closed automatically on try exit)
      */
     public static CaptureContext begin(String queryId) {
         return new CaptureContext(queryId);
     }
 
     /**
-     * Devuelve el {@code queryId} activo en el hilo actual, o {@code null}
-     * si no hay ningún {@link CaptureContext} abierto.
+     * Returns the {@code queryId} active on the current thread,
+     * or {@code null} if no context is open.
      */
     public static String currentQueryId() {
         return CURRENT_QUERY_ID.get();
     }
 
-    /**
-     * Elimina el {@code queryId} del {@link ThreadLocal} del hilo actual.
-     * Llamado automáticamente por {@code try-with-resources}.
-     */
+    /** Removes the {@code queryId} from the current thread's {@link ThreadLocal}. */
     @Override
     public void close() {
         CURRENT_QUERY_ID.remove();
