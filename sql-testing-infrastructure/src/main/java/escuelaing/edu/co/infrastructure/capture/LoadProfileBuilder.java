@@ -13,21 +13,21 @@ import java.util.Map;
 import java.util.stream.Collectors;
 
 /**
- * Agrega los {@link TransactionRecord}s capturados y construye el
- * {@link LoadProfile} que servirá como insumo para la Fase 3.
+ * Aggregates {@link TransactionRecord}s from {@link MetricsBuffer} and builds
+ * the {@link LoadProfile} consumed by phase 3.
  *
- * <h3>Estadísticas calculadas por consulta</h3>
+ * <h3>Statistics computed per query</h3>
  * <ul>
- *   <li><b>sampleCount</b> — número de muestras.</li>
- *   <li><b>meanMs</b> — latencia media aritmética.</li>
- *   <li><b>medianMs</b> — percentil 50 (p50).</li>
- *   <li><b>p95Ms</b> — percentil 95 (nearest-rank).</li>
- *   <li><b>p99Ms</b> — percentil 99 (nearest-rank).</li>
- *   <li><b>callsPerMinute</b> — frecuencia estimada sobre la ventana de observación.</li>
+ *   <li><b>sampleCount</b>, <b>meanMs</b>, <b>medianMs</b> (p50)</li>
+ *   <li><b>p95Ms</b>, <b>p99Ms</b> — nearest-rank percentiles</li>
+ *   <li><b>minMs</b>, <b>maxMs</b></li>
+ *   <li><b>callsPerMinute</b> — estimated over the observation window</li>
+ *   <li><b>capturedSql</b> — first non-blank SQL found in the sample set</li>
+ *   <li><b>sanitizedRealData</b> — up to 10 % of samples with sanitized row data</li>
  * </ul>
  *
- * <p>La ventana de observación se calcula como la diferencia entre el
- * {@code timestamp} más antiguo y el más reciente en el conjunto de muestras.</p>
+ * <p>The observation window is the span between the earliest and latest
+ * {@code timestamp} in the sample set.</p>
  */
 @Component
 public class LoadProfileBuilder {
@@ -39,22 +39,21 @@ public class LoadProfileBuilder {
     }
 
     /**
-     * Drena el {@link MetricsBuffer} y construye el {@link LoadProfile} con
-     * todos los registros acumulados hasta ahora.
+     * Drains {@link MetricsBuffer} and builds the {@link LoadProfile} from all
+     * accumulated records.
      *
-     * @return perfil de carga; puede contener cero entradas si no hay muestras.
+     * @return load profile; may contain zero entries if no samples are available
      */
     public LoadProfile build() {
-        List<TransactionRecord> records = metricsBuffer.drainFlushed();
-        return buildFrom(records);
+        return buildFrom(metricsBuffer.drainFlushed());
     }
 
     /**
-     * Construye el perfil a partir de una lista de registros ya recolectados.
-     * Útil para tests y para la integración con la Fase 3.
+     * Builds the profile from a provided list of records.
+     * Useful for tests and phase 3 integration.
      *
-     * @param records registros de entrada
-     * @return perfil de carga calculado
+     * @param records input records
+     * @return computed load profile
      */
     public LoadProfile buildFrom(List<TransactionRecord> records) {
         if (records.isEmpty()) {
@@ -92,9 +91,7 @@ public class LoadProfileBuilder {
                 .build();
     }
 
-    // -------------------------------------------------------------------------
-    // Cálculo estadístico
-    // -------------------------------------------------------------------------
+    // Statistics
 
     private LoadProfile.QueryStats computeStats(String queryId,
                                                 List<TransactionRecord> samples,
@@ -120,16 +117,12 @@ public class LoadProfileBuilder {
                 .findFirst()
                 .orElse(null);
 
-        // avgRowCount: promedio de filas afectadas (sólo muestras con rowCount > 0, i.e. writes)
         double avgRowCount = samples.stream()
                 .mapToLong(TransactionRecord::getRowCount)
                 .filter(rc -> rc > 0)
                 .average()
                 .orElse(0.0);
 
-        // sanitizedRealData: máx. 10 % de las muestras — filas reales sanitizadas
-        // capturadas por JdbcWrapper vía ResultSetCaptureHandler.
-        // Si ninguna muestra tiene datos (queries de escritura, p. ej.) la lista queda vacía.
         int maxRealRows = Math.max(1, (int) Math.ceil(n * 0.10));
         List<Map<String, Object>> sanitizedRealData = samples.stream()
                 .filter(r -> r.getSanitizedData() != null && !r.getSanitizedData().isEmpty())
@@ -154,8 +147,7 @@ public class LoadProfileBuilder {
     }
 
     /**
-     * Calcula el percentil {@code p} sobre una lista de latencias ya ordenada.
-     * Usa el método <i>nearest rank</i>.
+     * Computes percentile {@code p} over a sorted latency list using nearest-rank.
      */
     private double percentile(List<Long> sorted, double p) {
         if (sorted.isEmpty()) return 0.0;

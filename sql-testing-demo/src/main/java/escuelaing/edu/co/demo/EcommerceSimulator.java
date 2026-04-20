@@ -7,7 +7,6 @@ import escuelaing.edu.co.domain.model.LoadProfile;
 import escuelaing.edu.co.infrastructure.analysis.QueryRegistryLoader;
 import escuelaing.edu.co.infrastructure.capture.CaptureToggle;
 import escuelaing.edu.co.infrastructure.capture.JdbcWrapper;
-import escuelaing.edu.co.infrastructure.capture.SanitizationStrategy;
 import escuelaing.edu.co.infrastructure.capture.LoadProfileBuilder;
 import escuelaing.edu.co.infrastructure.capture.MetricsBuffer;
 import escuelaing.edu.co.infrastructure.capture.SamplingFilter;
@@ -25,27 +24,27 @@ import java.util.Random;
 import java.util.logging.Logger;
 
 /**
- * Simulador de tráfico e-commerce — Java puro, sin Spring.
+ * Simulates e-commerce traffic against the demo database to produce
+ * {@code load-profile.json} for phase 3.
  *
- * <p>Demuestra cómo cualquier aplicación Java con JDBC puro puede adoptar
- * CPT-SQL sin cambiar su stack tecnológico:</p>
- * <ol>
- *   <li>Instancia {@link JdbcWrapper} manualmente (sin contenedor Spring).</li>
- *   <li>Simula las 5 queries del repositorio durante {@value #SIMULATION_SECS} s.</li>
- *   <li>Construye el {@link LoadProfile} y lo persiste en {@code load-profile.json}.</li>
- * </ol>
+ * <p>In a real production application this simulator is not needed — real user
+ * traffic flows through {@link JdbcWrapper} automatically. This class exists
+ * only because the demo has no real users; it stands in for them by calling
+ * the five instrumented queries in proportions that reflect the declared
+ * traffic distribution in {@link ProductRepository}.</p>
  *
- * <h3>Uso</h3>
+ * <h3>Usage</h3>
  * <pre>
  * ./gradlew :sql-testing-demo:runSimulator
  * </pre>
  *
- * <h3>Variables de entorno</h3>
+ * <h3>Environment variables</h3>
  * <pre>
- * DB_URL          (default: jdbc:postgresql://localhost:5432/ecommerce_demo)
- * DB_USER         (default: demo)
- * DB_PASSWORD     (default: demo)
- * SIMULATION_SECS (default: 60) — duración de la simulación en segundos
+ * DB_URL                   (default: jdbc:postgresql://localhost:5432/ecommerce_demo)
+ * DB_USER                  (default: demo)
+ * DB_PASSWORD              (default: demo)
+ * SIMULATION_SECS          (default: 60)
+ * SIMULATOR_STMT_TIMEOUT_MS (default: 8000)
  * </pre>
  */
 public class EcommerceSimulator {
@@ -54,7 +53,7 @@ public class EcommerceSimulator {
 
     private static final int SIMULATION_SECS =
             Integer.parseInt(System.getenv().getOrDefault("SIMULATION_SECS", "60"));
-    private static final int THINK_TIME_MS   = 100;
+    private static final int THINK_TIME_MS = 100;
 
     private static final String[] CATEGORIES =
             {"electronics", "clothing", "books", "sports", "home"};
@@ -64,56 +63,38 @@ public class EcommerceSimulator {
         String user = env("DB_USER",     "demo");
         String pass = env("DB_PASSWORD", "demo");
 
-        // -------------------------------------------------------------------------
-        // 1. Wiring manual de CPT-SQL — sin Spring
-        // -------------------------------------------------------------------------
         ObjectMapper mapper = new ObjectMapper()
                 .registerModule(new JavaTimeModule())
                 .disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS);
 
         QueryRegistryLoader registry = new QueryRegistryLoader(mapper);
-        registry.load();                        // equivalente a @PostConstruct
+        registry.load();
 
         CaptureToggle toggle = new CaptureToggle();
         MetricsBuffer buffer = new MetricsBuffer();
-        buffer.start();                         // equivalente a @PostConstruct
+        buffer.start();
 
-        SamplingFilter       filter      = new SamplingFilter(registry);
-        SanitizationStrategy sanitization = new SanitizationStrategy();
-        JdbcWrapper          wrapper      = new JdbcWrapper(filter, buffer, toggle, sanitization);
+        SamplingFilter filter = new SamplingFilter(registry);
+        EcommerceSanitizationStrategy sanitization = new EcommerceSanitizationStrategy();
+        JdbcWrapper wrapper = new JdbcWrapper(filter, buffer, toggle, sanitization);
 
-        // -------------------------------------------------------------------------
-        // 2. Conexión, schema y seed data
-        // -------------------------------------------------------------------------
-        LOG.info("[Simulator] Conectando a " + url);
+        LOG.info("[Simulator] Connecting to " + url);
         try (Connection raw = DriverManager.getConnection(url, user, pass)) {
             applySchema(raw);
             insertSeedData(raw);
 
-            // Statement timeout por query: evita que una query degradada del PR
-            // bloquee el proceso completo. El propósito de Fase 2 es capturar el
-            // SQL text — la latencia real se mide en Fases 3+4 sobre el mirror DB.
-            // JdbcWrapper registra el SQL incluso cuando la ejecución falla.
             int stmtTimeoutMs = Integer.parseInt(
                     System.getenv().getOrDefault("SIMULATOR_STMT_TIMEOUT_MS", "8000"));
             try (Statement st = raw.createStatement()) {
                 st.execute("SET statement_timeout = '" + stmtTimeoutMs + "'");
             }
-            LOG.info("[Simulator] statement_timeout=" + stmtTimeoutMs + "ms configurado.");
+            LOG.info("[Simulator] statement_timeout=" + stmtTimeoutMs + "ms set.");
 
             Connection conn = wrapper.wrap(raw);
             EcommerceRepository repo = new EcommerceRepository(conn);
             Random rng = new Random(42);
 
-            // -------------------------------------------------------------------------
-            // 3. Simulación de tráfico — distribución proporcional a ProductRepository
-            //    searchByCategory  ~60 %   (query más frecuente del catálogo)
-            //    getProductDetail  ~20 %   (detalle de producto)
-            //    checkInventory    ~10 %   (verificación de stock pre-checkout)
-            //    createOrder        ~5 %   (transacción de compra)
-            //    updateInventory    ~5 %   (ajuste de stock post-venta)
-            // -------------------------------------------------------------------------
-            LOG.info("[Simulator] Simulando tráfico durante " + SIMULATION_SECS + " s...");
+            LOG.info("[Simulator] Simulating traffic for " + SIMULATION_SECS + " s...");
             long endMs = System.currentTimeMillis() + (long) SIMULATION_SECS * 1_000;
 
             while (System.currentTimeMillis() < endMs) {
@@ -123,7 +104,7 @@ public class EcommerceSimulator {
 
                 try { repo.searchByCategory(category); }
                 catch (SQLException e) {
-                    LOG.warning("[Simulator] searchByCategory cancelada (" + e.getMessage() + ")");
+                    LOG.warning("[Simulator] searchByCategory cancelled (" + e.getMessage() + ")");
                 }
 
                 try { repo.getProductDetail(productId); }
@@ -141,9 +122,7 @@ public class EcommerceSimulator {
                 if (rng.nextInt(10) == 0) {
                     try {
                         int orderId = repo.createOrder(customerId);
-                        if (orderId > 0) {
-                            repo.updateInventory(productId, -1);
-                        }
+                        if (orderId > 0) repo.updateInventory(productId, -1);
                     } catch (SQLException e) {
                         LOG.fine("[Simulator] createOrder/updateInventory: " + e.getMessage());
                     }
@@ -153,9 +132,6 @@ public class EcommerceSimulator {
             }
         }
 
-        // -------------------------------------------------------------------------
-        // 4. Construir LoadProfile y persistir
-        // -------------------------------------------------------------------------
         buffer.stop();
         LoadProfileBuilder builder = new LoadProfileBuilder(buffer);
         LoadProfile profile = builder.build();
@@ -163,14 +139,10 @@ public class EcommerceSimulator {
         Path out = Path.of("load-profile.json");
         mapper.writerWithDefaultPrettyPrinter().writeValue(out.toFile(), profile);
 
-        LOG.info("[Simulator] load-profile.json guardado — "
-                + profile.getTotalSamples() + " muestras, "
-                + profile.getQueries().size() + " queries capturadas.");
+        LOG.info("[Simulator] load-profile.json saved — "
+                + profile.getTotalSamples() + " samples, "
+                + profile.getQueries().size() + " queries captured.");
     }
-
-    // -------------------------------------------------------------------------
-    // Helpers
-    // -------------------------------------------------------------------------
 
     private static void applySchema(Connection conn) throws Exception {
         String script = Files.readString(
@@ -183,15 +155,14 @@ public class EcommerceSimulator {
                 }
             }
         }
-        LOG.info("[Simulator] Schema aplicado.");
+        LOG.info("[Simulator] Schema applied.");
     }
 
     private static void insertSeedData(Connection conn) throws SQLException {
-        try (PreparedStatement chk = conn.prepareStatement(
-                "SELECT COUNT(*) FROM products");
+        try (PreparedStatement chk = conn.prepareStatement("SELECT COUNT(*) FROM products");
              ResultSet rs = chk.executeQuery()) {
             if (rs.next() && rs.getLong(1) > 0) {
-                LOG.info("[Simulator] Seed data ya existe — omitiendo inserción.");
+                LOG.info("[Simulator] Seed data already exists — skipping.");
                 return;
             }
         }
@@ -213,11 +184,9 @@ public class EcommerceSimulator {
             }
             pc.executeBatch();
 
-            // 5 000 productos = 10 % del target de benchmark (50 k).
-            // Phase 3 genera los 50 k sintéticos completos usando este perfil.
             for (int i = 1; i <= 5000; i++) {
-                String cat   = CATEGORIES[rng.nextInt(CATEGORIES.length)];
-                double price = 10 + rng.nextInt(490);
+                String cat    = CATEGORIES[rng.nextInt(CATEGORIES.length)];
+                double price  = 10 + rng.nextInt(490);
                 double rating = Math.round((1.0 + rng.nextDouble() * 4.0) * 100) / 100.0;
                 pp.setString(1, "Product-" + i);
                 pp.setString(2, cat);
@@ -231,7 +200,7 @@ public class EcommerceSimulator {
         }
 
         conn.setAutoCommit(true);
-        LOG.info("[Simulator] Seed data insertada: 5000 customers, 50000 products.");
+        LOG.info("[Simulator] Seed data inserted: 5000 customers, 5000 products.");
     }
 
     private static String env(String key, String def) {
