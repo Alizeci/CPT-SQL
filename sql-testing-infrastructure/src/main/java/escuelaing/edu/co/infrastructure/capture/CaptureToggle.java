@@ -1,5 +1,7 @@
 package escuelaing.edu.co.infrastructure.capture;
 
+import jakarta.annotation.PostConstruct;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.jmx.export.annotation.ManagedAttribute;
 import org.springframework.jmx.export.annotation.ManagedOperation;
 import org.springframework.jmx.export.annotation.ManagedResource;
@@ -18,6 +20,15 @@ import java.util.Map;
  * <p>Exposed via JMX (MBean {@code escuelaing.edu.co:type=CaptureToggle}) and a
  * built-in REST endpoint for control from CI/CD or dashboards. The flag is
  * {@code volatile} to ensure cross-thread visibility without explicit synchronization.</p>
+ *
+ * <p>Defaults to {@code false} (capture off) to avoid unintended data accumulation
+ * on startup. Set {@code loadtest.capture.enabledOnStartup=true} to pre-enable
+ * capture before the first scheduled window.</p>
+ *
+ * <h3>Configuration</h3>
+ * <pre>
+ * loadtest.capture.enabledOnStartup=false
+ * </pre>
  */
 @Component
 @ManagedResource(
@@ -26,7 +37,15 @@ import java.util.Map;
 )
 public class CaptureToggle {
 
-    private volatile boolean enabled = true;
+    @Value("${loadtest.capture.enabledOnStartup:false}")
+    private boolean enabledOnStartup;
+
+    private volatile boolean enabled;
+
+    @PostConstruct
+    public void init() {
+        this.enabled = enabledOnStartup;
+    }
 
     @ManagedAttribute(description = "Current capture flag state")
     public boolean isEnabled() {
