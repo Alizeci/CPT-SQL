@@ -40,11 +40,14 @@ public class LoadProfileBuilder {
 
     /**
      * Drains {@link MetricsBuffer} and builds the {@link LoadProfile} from all
-     * accumulated records.
+     * accumulated records. Forces a flush of any records still pending in the
+     * buffer queue before draining, ensuring no samples are lost due to the
+     * periodic flush interval.
      *
      * @return load profile; may contain zero entries if no samples are available
      */
     public LoadProfile build() {
+        metricsBuffer.forceFlush();
         return buildFrom(metricsBuffer.drainFlushed());
     }
 
