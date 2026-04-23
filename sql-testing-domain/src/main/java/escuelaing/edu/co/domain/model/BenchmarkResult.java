@@ -10,24 +10,14 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * Resultado de una ejecución del motor de pruebas de carga (Fase 3).
+ * Result of a single benchmark execution (Phase 3).
  *
- * <p>Contiene, por cada {@code queryId}, las métricas medidas durante el
- * benchmark y el veredicto {@code PASS/FAIL} comparado contra los umbrales
- * declarados en {@code @Req} y la línea base almacenada.</p>
+ * <p>Contains per-query metrics measured during the benchmark and a
+ * {@code PASS/FAIL} verdict compared against {@code @Req} thresholds
+ * and the stored baseline.</p>
  *
- * <p>Se persiste como artefacto JSON con nombre
- * {@code benchmark-<profileName>-YYYYMMDD-HHmmss.json} (Fase 4).</p>
- *
- * <h3>Métricas enriquecidas</h3>
- * <ul>
- *   <li>{@code slaComplianceRate} por query: porcentaje de operaciones que
- *       no violaron el SLA — métrica M de Dyn-YCSB (Sidhanta et al., 2019).</li>
- *   <li>{@code throughputTimeSeries}: TPS observado cada 10 s durante la
- *       ventana de medición — visualización en tiempo real de BenchPress
- *       (Van Aken et al., SIGMOD 2015 §4.2).</li>
- *   <li>{@code latencyTimeSeries} por query: p50/p95/p99 por ventana de 10 s.</li>
- * </ul>
+ * <p>Persisted as a versioned JSON artifact named
+ * {@code benchmark-<profileName>-YYYYMMDD-HHmmss.json} (Phase 4).</p>
  */
 @Data
 @Builder
@@ -35,50 +25,45 @@ import java.util.Map;
 @AllArgsConstructor
 public class BenchmarkResult {
 
-    /** Nombre del perfil de carga ejecutado (ej. "pre-test", "nightly"). */
+    /** Load profile name (e.g. "pre-test", "nightly"). */
     private String profileName;
 
-    /** Nombre del {@link TestProfile} utilizado (ej. "light", "peak"). */
+    /** {@link TestProfile} name used (e.g. "light", "peak"). */
     private String testProfileName;
 
-    /** Momento en que se completó el benchmark. */
+    /** Timestamp when the benchmark completed. */
     private Instant executedAt;
 
-    /** SHA del commit que disparó la ejecución (puede ser null en ejecuciones manuales). */
+    /** SHA of the commit that triggered the run (null for manual executions). */
     private String commitSha;
 
-    /** Total de operaciones ejecutadas durante la ventana de medición. */
+    /** Total operations executed during the measurement window. */
     private long totalOperations;
 
-    /** Resultados por {@code queryId}. */
+    /** Per-queryId results. */
     private Map<String, QueryResult> queries;
 
-    /** Veredicto global: PASS si todas las consultas pasaron, FAIL si alguna falló. */
+    /** Overall verdict: PASS if all queries passed, FAIL if any failed. */
     private Verdict overallVerdict;
 
     /**
-     * TPS observado cada {@code metricsWindowSecs} segundos durante la
-     * ventana de medición.  Permite visualizar la evolución del throughput
-     * (BenchPress §4.2 Performance Visualization).
+     * Observed TPS sampled every {@code metricsWindowSecs} seconds during
+     * the measurement window. Enables throughput trend visualization over time.
      */
     private List<ThroughputSnapshot> throughputTimeSeries;
 
-    /**
-     * Pico máximo de throughput alcanzado durante el benchmark, en TPS.
-     * Relevante en perfiles {@code OPEN_LOOP} y en fases de pico.
-     */
+    /** Peak throughput reached during the benchmark, in TPS. */
     private double peakThroughputAchieved;
 
     // -------------------------------------------------------------------------
 
-    /** Veredicto de una ejecución de benchmark. */
     public enum Verdict { PASS, FAIL }
 
     // -------------------------------------------------------------------------
 
     /**
-     * Snapshot de throughput para la serie de tiempo.
-     * Capturado cada {@code metricsWindowSecs} segundos (default 10 s).
+     * Throughput snapshot for the time series.
+     * Captured every {@code metricsWindowSecs} seconds (default 10 s).
      */
     @Data
     @Builder
@@ -86,19 +71,19 @@ public class BenchmarkResult {
     @AllArgsConstructor
     public static class ThroughputSnapshot {
 
-        /** Milisegundos transcurridos desde el inicio de la ventana de medición. */
+        /** Milliseconds elapsed since the start of the measurement window. */
         private long elapsedMs;
 
-        /** Transacciones por segundo observadas en esta ventana. */
+        /** Transactions per second observed in this window. */
         private double tps;
 
-        /** Fase del TestProfile activa en este momento. */
+        /** TestProfile phase active at this moment. */
         private String phaseName;
     }
 
     /**
-     * Snapshot de latencias para la serie de tiempo por query.
-     * Permite ver cómo evoluciona el p95 durante las fases de carga.
+     * Per-query latency snapshot for the time series.
+     * Enables tracking how p95 evolves across load phases.
      */
     @Data
     @Builder
@@ -106,24 +91,24 @@ public class BenchmarkResult {
     @AllArgsConstructor
     public static class LatencySnapshot {
 
-        /** Milisegundos transcurridos desde el inicio de la ventana de medición. */
+        /** Milliseconds elapsed since the start of the measurement window. */
         private long elapsedMs;
 
-        /** Latencia mediana en esta ventana, en milisegundos. */
+        /** Median latency in this window, in milliseconds. */
         private double p50Ms;
 
-        /** Percentil 95 en esta ventana, en milisegundos. */
+        /** 95th percentile latency in this window, in milliseconds. */
         private double p95Ms;
 
-        /** Percentil 99 en esta ventana, en milisegundos. */
+        /** 99th percentile latency in this window, in milliseconds. */
         private double p99Ms;
 
-        /** Fase del TestProfile activa en este momento. */
+        /** TestProfile phase active at this moment. */
         private String phaseName;
     }
 
     /**
-     * Métricas y veredicto para una consulta individual dentro del benchmark.
+     * Metrics and verdict for a single query within the benchmark.
      */
     @Data
     @Builder
@@ -131,69 +116,71 @@ public class BenchmarkResult {
     @AllArgsConstructor
     public static class QueryResult {
 
-        /** Identificador de la consulta — puente con Fase 1. */
+        /** Query identifier — bridge with Phase 1. */
         private String queryId;
 
-        /** Número de ejecuciones realizadas durante la ventana de medición. */
+        /** Number of executions during the measurement window. */
         private long sampleCount;
 
-        /** Latencia media, en milisegundos. */
+        /** Mean latency, in milliseconds. */
         private double meanMs;
 
-        /** Latencia mediana (p50), en milisegundos. */
+        /** Median latency (p50), in milliseconds. */
         private double medianMs;
 
-        /** Percentil 95 de latencia, en milisegundos. */
+        /** 95th percentile latency, in milliseconds. */
         private double p95Ms;
 
-        /** Percentil 99 de latencia, en milisegundos. */
+        /** 99th percentile latency, in milliseconds. */
         private double p99Ms;
 
-        /** Latencia mínima observada, en milisegundos. */
+        /** Minimum observed latency, in milliseconds. */
         private long minMs;
 
-        /** Latencia máxima observada, en milisegundos. */
+        /** Maximum observed latency, in milliseconds. */
         private long maxMs;
 
-        /** Frecuencia de ejecución durante el benchmark, en llamadas por minuto. */
+        /** Execution frequency during the benchmark, in calls per minute. */
         private double callsPerMinute;
 
         /**
-         * Costo estimado del planificador capturado con {@code EXPLAIN ANALYZE}.
-         * Permite comparar planes entre versiones del esquema o estadísticas.
+         * Estimated planner cost captured via {@code EXPLAIN ANALYZE}.
+         * Used to detect plan regressions between schema or statistics versions.
          */
         private double planCost;
 
         /**
-         * Porcentaje de operaciones que NO violaron el SLA declarado en {@code @Req}.
-         *
-         * <p>Equivale a la métrica M de Dyn-YCSB (Sidhanta et al., 2019):
-         * "computes the percentage of operations which did not violate the SLA."
-         * Un valor de 100.0 significa que todas las operaciones estuvieron dentro
-         * del umbral {@code maxResponseTimeMs}.</p>
+         * Full execution plan text from the last {@code EXPLAIN ANALYZE} run for
+         * this query. Complements {@code planCost} by showing structural changes
+         * (e.g. index scan → seq scan) that a cost threshold alone cannot identify.
+         */
+        private String executionPlanText;
+
+        /**
+         * Percentage of operations that did not violate the SLA declared in {@code @Req}.
+         * A value of 100.0 means all operations stayed within {@code maxResponseTimeMs}.
          */
         private double slaComplianceRate;
 
         /**
-         * Porcentaje del umbral SLA consumido por el p95 medido.
-         * Ejemplo: p95=86ms con SLA=100ms → slaRiskPct=86%.
-         * Valores > 70% indican riesgo de violación bajo mayor carga.
+         * Percentage of the SLA threshold consumed by the measured p95.
+         * Example: p95=86 ms with SLA=100 ms → slaRiskPct=86 %.
+         * Values above 70 % indicate risk of violation under higher load.
          */
         private double slaRiskPct;
 
         /**
-         * Evolución de latencias por ventana de tiempo durante la medición.
-         * Permite detectar degradaciones puntuales dentro de la ventana
-         * (BenchPress §4.2 Performance Visualization).
+         * Latency evolution per time window during the measurement.
+         * Enables detecting point-in-time spikes within the measurement window.
          */
         private List<LatencySnapshot> latencyTimeSeries;
 
-        /** Veredicto individual: PASS o FAIL. */
+        /** Individual verdict: PASS or FAIL. */
         private Verdict verdict;
 
         /**
-         * Razón del fallo cuando {@code verdict == FAIL}, {@code null} cuando PASS.
-         * Ejemplo: "p95=320ms supera maxResponseTimeMs=200ms".
+         * Failure reason when {@code verdict == FAIL}, {@code null} when PASS.
+         * Example: "p95=320ms exceeds maxResponseTimeMs=200ms".
          */
         private String failReason;
     }

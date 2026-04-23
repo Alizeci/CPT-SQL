@@ -99,14 +99,6 @@ jobs:
         env:
           GITHUB_SHA: ${{ github.sha }}
 
-      # ── Save baseline candidate ───────────────────────────────────────────────
-      - name: Save baseline candidate to cache
-        if: hashFiles('baseline-candidate.json') != ''
-        uses: actions/cache/save@v4
-        with:
-          path: baseline-candidate.json
-          key: baseline-candidate-${{ github.event.pull_request.head.sha }}
-
       # ── Post warnings as PR comment ───────────────────────────────────────────
       - name: Post warnings on PR
         if: always() && hashFiles('benchmark-warnings.txt') != ''

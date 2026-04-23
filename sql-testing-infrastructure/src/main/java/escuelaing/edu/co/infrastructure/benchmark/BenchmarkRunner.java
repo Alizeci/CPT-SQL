@@ -37,45 +37,35 @@ import java.util.Map;
 import java.util.logging.Logger;
 
 /**
- * Orquesta la ejecución del motor de pruebas de carga (Fase 3).
+ * Orchestrates Phase 3: provisions the mirror database, populates it with
+ * synthetic data, and drives the benchmark execution loop.
  *
- * <h3>Ciclo de ejecución</h3>
- * <p>El runner itera sobre las {@link TestProfile.Phase} definidas en el
- * {@link TestProfile} activo. Cada fase controla:</p>
- * <ol>
- *   <li><b>targetTps</b> — throughput objetivo (ops/s) en modo CLOSED_LOOP.</li>
- *   <li><b>throughputFunction</b> — STEP (salto brusco) o LINEAR (rampa).</li>
- *   <li><b>mixturePreset</b> — proporción reads/writes para esa fase.</li>
- *   <li><b>measurement</b> — si las muestras se incluyen en el resultado.</li>
- * </ol>
+ * <p>Iterates over {@link TestProfile} phases in order; only samples from phases
+ * marked {@code measurement=true} are included in the result. Throughput is
+ * regulated in CLOSED_LOOP mode — the runner sleeps between iterations to match
+ * the target TPS. LINEAR phases interpolate throughput from the previous phase's
+ * target; STEP phases jump immediately to the new target.</p>
  *
- * <p>Este diseño sigue el modelo de BenchPress (Van Aken et al., SIGMOD 2015
- * §2.1) donde "a phase is defined as (1) a target transaction rate,
- * (2) a transaction mixture, and (3) a time duration in seconds."
- * La variación T=f(t) por fase sigue el modelo de Dyn-YCSB
- * (Sidhanta et al., IEEE SERVICES 2019).</p>
+ * <p>Metrics computed per query: p50, p95, p99, mean, min, max latency;
+ * {@code slaComplianceRate} (% of operations within {@code @Req.maxResponseTimeMs});
+ * average planner cost from EXPLAIN ANALYZE; TPS and latency time-series
+ * sampled every {@code metricsWindowSecs} seconds.</p>
  *
- * <h3>Métricas recolectadas</h3>
- * <ul>
- *   <li>p50, p95, p99 por query — al finalizar la ventana de medición.</li>
- *   <li>{@code slaComplianceRate} — métrica M de Dyn-YCSB: % de operaciones
- *       dentro del SLA declarado en {@code @Req.maxResponseTimeMs}.</li>
- *   <li>{@code throughputTimeSeries} — TPS cada 10 s (BenchPress §4.2).</li>
- *   <li>{@code latencyTimeSeries} — p50/p95/p99 por ventana de 10 s por query.</li>
- * </ul>
- *
- * <h3>Configuración (application.properties)</h3>
  * <pre>
  * loadtest.benchmark.profileName=nightly
  * loadtest.benchmark.testProfile=normal   # light | normal | peak | sustained | wave
  * loadtest.benchmark.thinkTimeMs=100
  * loadtest.benchmark.metricsWindowSecs=10
+ * loadtest.sla.complianceThresholdPct=95.0
  * </pre>
  */
 @Component
 public class BenchmarkRunner {
 
     private static final Logger LOG = Logger.getLogger(BenchmarkRunner.class.getName());
+
+    /** Number of executions per query during latency fidelity validation. */
+    private static final int VALIDATION_RUNS = 5;
 
     @Value("${loadtest.benchmark.profileName:nightly}")
     private String profileName;
@@ -90,11 +80,8 @@ public class BenchmarkRunner {
     private int metricsWindowSecs;
 
     /**
-     * Porcentaje mínimo de operaciones dentro del SLA para que el veredicto sea PASS.
-     * Si {@code slaComplianceRate} cae por debajo de este umbral, el veredicto
-     * de la consulta se marca como FAIL (§3.4.3).
-     * Configurable en {@code application.properties} como
-     * {@code loadtest.sla.complianceThresholdPct} (default: 95.0).
+     * Minimum SLA compliance rate for a query verdict to be PASS.
+     * If {@code slaComplianceRate} falls below this threshold the query is marked FAIL.
      */
     @Value("${loadtest.sla.complianceThresholdPct:95.0}")
     private double slaComplianceThresholdPct;
@@ -115,37 +102,24 @@ public class BenchmarkRunner {
     }
 
     // -------------------------------------------------------------------------
-    // API pública
+    // Public API
     // -------------------------------------------------------------------------
 
-    /**
-     * Ejecuta el benchmark usando el {@link TestProfile} configurado.
-     *
-     * @param profile   perfil de carga construido en la Fase 2
-     * @param commitSha SHA del commit actual (puede ser null)
-     * @return resultado con métricas, series de tiempo y veredicto por consulta
-     */
+    /** Runs the benchmark using the test profile configured in application.properties. */
     public BenchmarkResult run(LoadProfile profile, String commitSha) {
-        TestProfile testProfile = TestProfile.fromName(testProfileName);
-        return run(profile, testProfile, commitSha);
+        return run(profile, TestProfile.fromName(testProfileName), commitSha);
     }
 
-    /**
-     * Ejecuta el benchmark con un {@link TestProfile} específico.
-     * Útil para lanzar distintos perfiles desde el pipeline nocturno.
-     *
-     * @param profile      perfil de carga de Fase 2
-     * @param testProfile  perfil de ejecución dinámico
-     * @param commitSha    SHA del commit actual (puede ser null)
-     */
+    /** Runs the benchmark with an explicit test profile. */
     public BenchmarkResult run(LoadProfile profile, TestProfile testProfile, String commitSha) {
-        LOG.info("[BenchmarkRunner] Iniciando benchmark '" + profileName
-                + "' con TestProfile '" + testProfile.getName() + "'");
+        LOG.info("[BenchmarkRunner] Starting benchmark '" + profileName
+                + "' with TestProfile '" + testProfile.getName() + "'");
 
         provisioner.provision();
 
         try (Connection conn = provisioner.openConnection()) {
             dataGenerator.populate(conn, profile);
+            queryExecutor.setStringPool(dataGenerator.buildStringPool(profile));
 
             PhaseAccumulator accumulator = new PhaseAccumulator();
             for (TestProfile.Phase phase : testProfile.getPhases()) {
@@ -155,12 +129,27 @@ public class BenchmarkRunner {
             persistBenchmarkResult(result);
             return result;
         } catch (SQLException e) {
-            throw new RuntimeException("Error durante el benchmark", e);
+            throw new RuntimeException("Benchmark execution failed", e);
         }
     }
 
+    /**
+     * Runs fidelity validation before the benchmark.
+     * Throws {@link ValidationFailedException} if validation does not pass.
+     */
+    public BenchmarkResult runWithValidation(LoadProfile profile, String commitSha, boolean validate) {
+        if (validate) {
+            ValidationReport report = performValidation(profile);
+            persistValidationReport(report);
+            if (!report.isPass()) {
+                throw new ValidationFailedException(report);
+            }
+        }
+        return run(profile, commitSha);
+    }
+
     // -------------------------------------------------------------------------
-    // Ejecución por fase
+    // Phase execution
     // -------------------------------------------------------------------------
 
     private void executePhase(Connection conn,
@@ -169,7 +158,7 @@ public class BenchmarkRunner {
                                TestProfile.Phase phase,
                                PhaseAccumulator accumulator) throws SQLException {
 
-        LOG.info("[BenchmarkRunner] Fase '" + phase.getName() + "': "
+        LOG.info("[BenchmarkRunner] Phase '" + phase.getName() + "': "
                 + "tps=" + phase.getTargetTps()
                 + ", dur=" + phase.getDurationSecs() + "s"
                 + ", mixture=" + phase.getMixturePreset()
@@ -180,7 +169,7 @@ public class BenchmarkRunner {
         long prevTps      = accumulator.lastTargetTps;
         int  targetTps    = phase.getTargetTps();
 
-        long windowStartMs             = phaseStartMs;
+        long windowStartMs = phaseStartMs;
         List<TransactionRecord> windowSamples = new ArrayList<>();
 
         while (System.currentTimeMillis() < phaseEndMs) {
@@ -188,12 +177,9 @@ public class BenchmarkRunner {
             long phaseMs          = (long) phase.getDurationSecs() * 1_000;
 
             int effectiveTps = computeEffectiveTps(
-                    phase.getThroughputFunction(), prevTps, targetTps,
-                    elapsedInPhaseMs, phaseMs);
+                    phase.getThroughputFunction(), prevTps, targetTps, elapsedInPhaseMs, phaseMs);
 
-            long thinkMs = effectiveTps > 0
-                    ? Math.max(1L, 1_000L / effectiveTps)
-                    : thinkTimeMs;
+            long thinkMs = effectiveTps > 0 ? Math.max(1L, 1_000L / effectiveTps) : thinkTimeMs;
 
             for (Map.Entry<String, LoadProfile.QueryStats> entry : selectQueries(profile, phase).entrySet()) {
                 TransactionRecord record = queryExecutor.execute(
@@ -208,8 +194,7 @@ public class BenchmarkRunner {
 
             long now = System.currentTimeMillis();
             if (phase.isMeasurement() && (now - windowStartMs) >= (long) metricsWindowSecs * 1_000) {
-                long elapsedFromStart = now - accumulator.measurementStartMs;
-                emitSnapshots(windowSamples, elapsedFromStart, phase.getName(), accumulator);
+                emitSnapshots(windowSamples, now - accumulator.measurementStartMs, phase.getName(), accumulator);
                 windowSamples.clear();
                 windowStartMs = now;
             }
@@ -218,8 +203,9 @@ public class BenchmarkRunner {
         }
 
         if (phase.isMeasurement() && !windowSamples.isEmpty()) {
-            long elapsedFromStart = System.currentTimeMillis() - accumulator.measurementStartMs;
-            emitSnapshots(windowSamples, elapsedFromStart, phase.getName(), accumulator);
+            emitSnapshots(windowSamples,
+                    System.currentTimeMillis() - accumulator.measurementStartMs,
+                    phase.getName(), accumulator);
         }
 
         if (phase.isMeasurement() && accumulator.measurementStartMs == 0) {
@@ -227,7 +213,7 @@ public class BenchmarkRunner {
         }
 
         accumulator.lastTargetTps = targetTps;
-        LOG.info("[BenchmarkRunner] Fase '" + phase.getName() + "' completada.");
+        LOG.info("[BenchmarkRunner] Phase '" + phase.getName() + "' completed.");
     }
 
     private int computeEffectiveTps(TestProfile.ThroughputFunction fn,
@@ -247,7 +233,7 @@ public class BenchmarkRunner {
         }
         Map<String, LoadProfile.QueryStats> filtered = new HashMap<>();
         for (Map.Entry<String, LoadProfile.QueryStats> e : profile.getQueries().entrySet()) {
-            String sql    = e.getValue().getCapturedSql();
+            String sql     = e.getValue().getCapturedSql();
             boolean isRead = sql == null || sql.trim().toUpperCase().startsWith("SELECT");
             if (phase.getMixturePreset() == TestProfile.MixturePreset.READ_HEAVY && isRead) {
                 filtered.put(e.getKey(), e.getValue());
@@ -259,7 +245,7 @@ public class BenchmarkRunner {
     }
 
     // -------------------------------------------------------------------------
-    // Series de tiempo (BenchPress §4.2)
+    // Time-series snapshots
     // -------------------------------------------------------------------------
 
     private void emitSnapshots(List<TransactionRecord> windowSamples,
@@ -270,10 +256,7 @@ public class BenchmarkRunner {
 
         double tps = (double) windowSamples.size() / metricsWindowSecs;
         accumulator.throughputSeries.add(BenchmarkResult.ThroughputSnapshot.builder()
-                .elapsedMs(elapsedMs)
-                .tps(tps)
-                .phaseName(phaseName)
-                .build());
+                .elapsedMs(elapsedMs).tps(tps).phaseName(phaseName).build());
         if (tps > accumulator.peakTps) accumulator.peakTps = tps;
 
         Map<String, List<TransactionRecord>> byQuery = new HashMap<>();
@@ -297,14 +280,13 @@ public class BenchmarkRunner {
     }
 
     // -------------------------------------------------------------------------
-    // Construcción del resultado
+    // Result aggregation
     // -------------------------------------------------------------------------
 
     private BenchmarkResult buildResult(PhaseAccumulator accumulator,
                                          LoadProfile profile,
                                          TestProfile testProfile,
                                          String commitSha) {
-
         List<TransactionRecord> samples = accumulator.allSamples;
         Map<String, List<TransactionRecord>> byQuery = new HashMap<>();
         for (TransactionRecord r : samples) {
@@ -318,14 +300,18 @@ public class BenchmarkRunner {
         boolean anyFail = false;
 
         for (Map.Entry<String, List<TransactionRecord>> entry : byQuery.entrySet()) {
-            String qid      = entry.getKey();
+            String qid = entry.getKey();
             List<TransactionRecord> qSamples = entry.getValue();
 
             List<Long> latencies = new ArrayList<>();
             double totalPlanCost = 0.0;
+            String lastPlanText = null;
             for (TransactionRecord r : qSamples) {
                 latencies.add(r.getLatencyMs());
                 totalPlanCost += QueryExecutor.extractPlanCost(r.getExecutionPlan());
+                if (r.getExecutionPlan() != null && !r.getExecutionPlan().isBlank()) {
+                    lastPlanText = r.getExecutionPlan();
+                }
             }
             Collections.sort(latencies);
 
@@ -339,29 +325,25 @@ public class BenchmarkRunner {
             double cpm    = n / windowMin;
             double avgPlan = n > 0 ? totalPlanCost / n : 0.0;
 
-            // SLA compliance rate — métrica M de Dyn-YCSB
-            // El umbral es maxResponseTimeMs declarado en @Req (Fase 1)
-            LoadProfile.QueryStats stats = profile.getQueries().get(qid);
+            // slaComplianceRate: % of operations within the declared SLA threshold
             QueryEntry req = queryRegistry.get(qid);
             long slaThresholdMs = (req != null && req.isHasReq())
-                    ? req.getMaxResponseTimeMs()
-                    : Long.MAX_VALUE;
+                    ? req.getMaxResponseTimeMs() : Long.MAX_VALUE;
             long within       = latencies.stream().filter(l -> l <= slaThresholdMs).count();
             double compliance = n > 0 ? (within * 100.0 / n) : 100.0;
             double slaRiskPct = (req != null && req.isHasReq() && req.getMaxResponseTimeMs() > 0)
-                    ? (p95 / req.getMaxResponseTimeMs()) * 100.0
-                    : 0.0;
+                    ? (p95 / req.getMaxResponseTimeMs()) * 100.0 : 0.0;
 
             BenchmarkResult.Verdict verdict = BenchmarkResult.Verdict.PASS;
             String failReason = null;
             if (req != null && req.isHasReq() && p95 > req.getMaxResponseTimeMs()) {
                 verdict    = BenchmarkResult.Verdict.FAIL;
-                failReason = String.format("p95=%.0fms supera maxResponseTimeMs=%dms de @Req",
+                failReason = String.format("p95=%.0fms exceeds maxResponseTimeMs=%dms (@Req)",
                         p95, req.getMaxResponseTimeMs());
                 anyFail = true;
             } else if (compliance < slaComplianceThresholdPct) {
                 verdict    = BenchmarkResult.Verdict.FAIL;
-                failReason = String.format("slaComplianceRate=%.1f%% por debajo del umbral %.1f%%",
+                failReason = String.format("slaComplianceRate=%.1f%% below threshold %.1f%%",
                         compliance, slaComplianceThresholdPct);
                 anyFail = true;
             }
@@ -377,6 +359,7 @@ public class BenchmarkRunner {
                     .maxMs(max)
                     .callsPerMinute(cpm)
                     .planCost(avgPlan)
+                    .executionPlanText(lastPlanText)
                     .slaComplianceRate(compliance)
                     .slaRiskPct(slaRiskPct)
                     .latencyTimeSeries(accumulator.latencySeries.getOrDefault(qid, List.of()))
@@ -392,9 +375,7 @@ public class BenchmarkRunner {
                 .commitSha(commitSha)
                 .totalOperations(samples.size())
                 .queries(Collections.unmodifiableMap(queryResults))
-                .overallVerdict(anyFail
-                        ? BenchmarkResult.Verdict.FAIL
-                        : BenchmarkResult.Verdict.PASS)
+                .overallVerdict(anyFail ? BenchmarkResult.Verdict.FAIL : BenchmarkResult.Verdict.PASS)
                 .throughputTimeSeries(accumulator.throughputSeries)
                 .peakThroughputAchieved(accumulator.peakTps)
                 .build();
@@ -408,63 +389,16 @@ public class BenchmarkRunner {
     }
 
     // -------------------------------------------------------------------------
-    // Utilidades
-    // -------------------------------------------------------------------------
-
-    private double percentile(List<Long> sorted, double p) {
-        if (sorted.isEmpty()) return 0.0;
-        int index = (int) Math.ceil(p / 100.0 * sorted.size()) - 1;
-        return sorted.get(Math.max(0, Math.min(index, sorted.size() - 1)));
-    }
-
-    private void sleep(long ms) {
-        if (ms <= 0) return;
-        try {
-            Thread.sleep(ms);
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-        }
-    }
-
-    // -------------------------------------------------------------------------
-    // Validación de fidelidad (SynQB — Liu et al., 2024)
+    // Fidelity validation
     // -------------------------------------------------------------------------
 
     /**
-     * Entry point que ejecuta la validación de fidelidad antes del benchmark.
-     *
-     * <p>Si {@code validate} es {@code true}, ejecuta las tres dimensiones de
-     * validación (latencia, cardinalidad, reproducibilidad) y lanza
-     * {@link ValidationFailedException} si alguna falla. Si {@code false},
-     * delega directamente a {@link #run(LoadProfile, String)}.</p>
-     *
-     * @param profile     perfil de carga de Fase 2
-     * @param commitSha   SHA del commit actual (puede ser null)
-     * @param validate    si {@code true}, realiza la validación previa
-     * @return resultado del benchmark
-     * @throws ValidationFailedException si la validación no supera los umbrales
-     */
-    public BenchmarkResult runWithValidation(LoadProfile profile,
-                                              String commitSha,
-                                              boolean validate) {
-        if (validate) {
-            ValidationReport report = performValidation(profile);
-            persistValidationReport(report);
-            if (!report.isPass()) {
-                throw new ValidationFailedException(report);
-            }
-        }
-        return run(profile, commitSha);
-    }
-
-    /**
-     * Orquesta las tres dimensiones de validación de fidelidad y compila el informe.
-     *
-     * @param profile perfil de carga con estadísticas de producción
-     * @return informe consolidado con veredicto global
+     * Runs the three fidelity validation dimensions (latency, cardinality,
+     * reproducibility) and compiles a {@link ValidationReport}.
+     * Pass criterion: ≥ 90 % of queries must pass each dimension.
      */
     public ValidationReport performValidation(LoadProfile profile) {
-        LOG.info("[BenchmarkRunner] Iniciando validación de fidelidad (SynQB)...");
+        LOG.info("[BenchmarkRunner] Starting fidelity validation...");
         provisioner.provision();
 
         try (Connection conn = provisioner.openConnection()) {
@@ -474,7 +408,6 @@ public class BenchmarkRunner {
             Map<String, CardinalityFidelity> cardinality     = validateCardinalityFidelity(conn, profile);
             ReproducibilityCheck             reproducibility = validateReproducibility(conn, profile);
 
-            // Criterio ≥ 90 % de queries pasan (SynQB §3.5.1)
             boolean latencyPass     = passRate(latency.values().stream()
                     .map(LatencyFidelity::isPass).toList()) >= 0.90;
             boolean cardinalityPass = cardinality.isEmpty() || passRate(cardinality.values().stream()
@@ -495,16 +428,13 @@ public class BenchmarkRunner {
                             .mapToDouble(CardinalityFidelity::getErrorPct).average().orElse(0.0))
                     .build();
 
-            int tablesPopulated = dataGenerator.getLastTablesPopulated();
-            String schemaCoverage = "100% (" + tablesPopulated + " tables)";
-
             SyntheticDataInfo syntheticInfo = SyntheticDataInfo.builder()
                     .epsilonFt(SyntheticDataGenerator.EPSILON_FT)
                     .epsilonUii(SyntheticDataGenerator.EPSILON_UII)
                     .epsilonTotal(SyntheticDataGenerator.EPSILON_TOTAL)
                     .delta(1e-6)
                     .totalRowsGenerated(dataGenerator.getLastRowsGenerated())
-                    .schemaCoverage(schemaCoverage)
+                    .schemaCoverage("100% (" + dataGenerator.getLastTablesPopulated() + " tables)")
                     .build();
 
             String notes = allPass
@@ -515,9 +445,7 @@ public class BenchmarkRunner {
                             reproducibility.isPass() ? "PASS" : "FAIL");
 
             ValidationReport report = ValidationReport.builder()
-                    .validationStatus(allPass
-                            ? ValidationReport.Status.PASS
-                            : ValidationReport.Status.FAIL)
+                    .validationStatus(allPass ? ValidationReport.Status.PASS : ValidationReport.Status.FAIL)
                     .generatedAt(Instant.now())
                     .seed(dataGenerator.getSeed())
                     .syntheticDataGeneration(syntheticInfo)
@@ -530,70 +458,54 @@ public class BenchmarkRunner {
                     .notes(notes)
                     .build();
 
-            LOG.info("[BenchmarkRunner] Validación: " + report.getValidationStatus());
+            LOG.info("[BenchmarkRunner] Validation: " + report.getValidationStatus());
             return report;
 
         } catch (SQLException e) {
-            throw new RuntimeException("Error durante la validación de fidelidad", e);
+            throw new RuntimeException("Fidelity validation failed", e);
         }
     }
 
     /**
-     * Valida que el p95 medido sobre datos sintéticos difiere en menos del 10 %
-     * del p95 real registrado en el {@link LoadProfile} (producción).
-     *
-     * <p>Cada query se ejecuta {@code VALIDATION_RUNS} veces sobre la BD espejo.
-     * El p95 sintético se compara con {@link LoadProfile.QueryStats#getP95Ms()}.</p>
+     * Validates that p95 on synthetic data differs by less than
+     * {@link SyntheticDataGenerator#LATENCY_ERROR_THRESHOLD_PCT} from the
+     * production p95 recorded in the load profile.
      */
-    private static final int VALIDATION_RUNS = 5;
-
-    public Map<String, LatencyFidelity> validateLatencyFidelity(Connection conn,
-                                                                  LoadProfile profile) {
+    public Map<String, LatencyFidelity> validateLatencyFidelity(Connection conn, LoadProfile profile) {
         Map<String, LatencyFidelity> results = new HashMap<>();
         for (Map.Entry<String, LoadProfile.QueryStats> entry : profile.getQueries().entrySet()) {
-            String qid   = entry.getKey();
+            String qid = entry.getKey();
             LoadProfile.QueryStats stats = entry.getValue();
             if (stats.getCapturedSql() == null) continue;
 
             List<Long> latencies = new ArrayList<>();
             for (int i = 0; i < VALIDATION_RUNS; i++) {
-                TransactionRecord rec = queryExecutor.execute(conn, qid, stats, stats.getCapturedSql());
-                latencies.add(rec.getLatencyMs());
+                latencies.add(queryExecutor.execute(conn, qid, stats, stats.getCapturedSql()).getLatencyMs());
             }
             Collections.sort(latencies);
             long p95Syn  = (long) percentile(latencies, 95.0);
             long p95Real = (long) stats.getP95Ms();
 
-            double errorPct = p95Real > 0
-                    ? Math.abs(p95Syn - p95Real) * 100.0 / p95Real
-                    : 0.0;
-            boolean pass = errorPct < SyntheticDataGenerator.LATENCY_ERROR_THRESHOLD_PCT;
+            double errorPct = p95Real > 0 ? Math.abs(p95Syn - p95Real) * 100.0 / p95Real : 0.0;
+            boolean pass    = errorPct < SyntheticDataGenerator.LATENCY_ERROR_THRESHOLD_PCT;
 
             results.put(qid, LatencyFidelity.builder()
-                    .queryId(qid)
-                    .p95RealMs(p95Real)
-                    .p95SyntheticMs(p95Syn)
-                    .errorPct(errorPct)
-                    .pass(pass)
-                    .build());
+                    .queryId(qid).p95RealMs(p95Real).p95SyntheticMs(p95Syn)
+                    .errorPct(errorPct).pass(pass).build());
 
-            LOG.info(String.format("[Validation] Latencia %s: p95_real=%d ms, p95_syn=%d ms, error=%.1f %% → %s",
+            LOG.info(String.format("[Validation] Latency %s: p95_real=%d ms, p95_syn=%d ms, error=%.1f%% → %s",
                     qid, p95Real, p95Syn, errorPct, pass ? "PASS" : "FAIL"));
         }
         return results;
     }
 
     /**
-     * Valida la fidelidad de cardinalidad para queries de escritura (INSERT/UPDATE/DELETE).
+     * Validates cardinality fidelity for write queries (INSERT/UPDATE/DELETE).
      *
-     * <p>Compara el promedio de filas afectadas en producción ({@code avgRowCount} del
-     * {@link LoadProfile}) con las filas afectadas al ejecutar la misma query sobre la
-     * BD espejo. Queries SELECT ({@code avgRowCount == 0}) se omiten — no se puede
-     * determinar el conteo de filas sin consumir el ResultSet (limitación documentada
-     * en §5.2).</p>
-     *
-     * <p>La query se ejecuta dentro de un savepoint y se hace rollback para no alterar
-     * el estado de la BD espejo antes de la ejecución del benchmark.</p>
+     * <p>Compares rows affected in production ({@code avgRowCount} from the profile)
+     * with rows affected on the mirror database. SELECT queries ({@code avgRowCount == 0})
+     * are skipped — row count is unavailable without consuming the ResultSet.
+     * Each write is executed inside a savepoint and rolled back to preserve mirror state.</p>
      */
     public Map<String, CardinalityFidelity> validateCardinalityFidelity(Connection conn,
                                                                           LoadProfile profile) {
@@ -602,33 +514,28 @@ public class BenchmarkRunner {
             String qid = entry.getKey();
             LoadProfile.QueryStats stats = entry.getValue();
             if (stats.getCapturedSql() == null) continue;
-            if (stats.getAvgRowCount() == 0) continue; // SELECT o sin datos — N/A
+            if (stats.getAvgRowCount() == 0) continue;
 
             double rowsReal      = stats.getAvgRowCount();
             long   rowsSynthetic = countWriteAffectedRows(conn, stats.getCapturedSql());
 
             double errorPct = rowsReal > 0
-                    ? Math.abs(rowsSynthetic - rowsReal) * 100.0 / rowsReal
-                    : 0.0;
-            boolean pass = errorPct < SyntheticDataGenerator.CARDINALITY_ERROR_THRESHOLD_PCT;
+                    ? Math.abs(rowsSynthetic - rowsReal) * 100.0 / rowsReal : 0.0;
+            boolean pass    = errorPct < SyntheticDataGenerator.CARDINALITY_ERROR_THRESHOLD_PCT;
 
             results.put(qid, CardinalityFidelity.builder()
-                    .queryId(qid)
-                    .rowsReal((long) rowsReal)
-                    .rowsSynthetic(rowsSynthetic)
-                    .errorPct(errorPct)
-                    .pass(pass)
-                    .build());
+                    .queryId(qid).rowsReal((long) rowsReal).rowsSynthetic(rowsSynthetic)
+                    .errorPct(errorPct).pass(pass).build());
 
-            LOG.info(String.format("[Validation] Cardinalidad %s: real=%.0f, syn=%d, error=%.1f %% → %s",
+            LOG.info(String.format("[Validation] Cardinality %s: real=%.0f, syn=%d, error=%.1f%% → %s",
                     qid, rowsReal, rowsSynthetic, errorPct, pass ? "PASS" : "FAIL"));
         }
         return results;
     }
 
     /**
-     * Verifica que generar datos con el mismo seed produce resultados byte-identical
-     * en dos ejecuciones consecutivas (CRC32 sobre el contenido de las tablas).
+     * Verifies that generating data with the same seed produces byte-identical
+     * results across two consecutive runs (CRC32 over table contents).
      */
     public ReproducibilityCheck validateReproducibility(Connection conn,
                                                          LoadProfile profile) throws SQLException {
@@ -643,82 +550,67 @@ public class BenchmarkRunner {
         long checksum2 = computeTablesChecksum(conn);
 
         boolean identical = checksum1 == checksum2;
-        LOG.info(String.format("[Validation] Reproducibilidad: crc1=%d, crc2=%d → %s",
+        LOG.info(String.format("[Validation] Reproducibility: crc1=%d, crc2=%d → %s",
                 checksum1, checksum2, identical ? "PASS" : "FAIL"));
 
         return ReproducibilityCheck.builder()
-                .seed(seed)
-                .checksum1(checksum1)
-                .checksum2(checksum2)
-                .byteIdentical(identical)
-                .pass(identical)
-                .build();
+                .seed(seed).checksum1(checksum1).checksum2(checksum2)
+                .byteIdentical(identical).pass(identical).build();
     }
 
+    // -------------------------------------------------------------------------
+    // Persistence
+    // -------------------------------------------------------------------------
+
     /**
-     * Persiste el {@link BenchmarkResult} como JSON versionado en
+     * Persists the result as a versioned JSON file at
      * {@code build/results/benchmark-<profile>-<timestamp>.json}.
-     *
-     * <p>El nombre del artefacto incluye el identificador del perfil de carga y la
-     * marca temporal (UTC) de la ejecución, garantizando trazabilidad directa entre
-     * commit y métricas (§3.5 Fase 4).</p>
      */
     public void persistBenchmarkResult(BenchmarkResult result) {
         try {
             Path dir = Path.of("build", "results");
             Files.createDirectories(dir);
             String timestamp = DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss")
-                    .withZone(ZoneOffset.UTC)
-                    .format(result.getExecutedAt());
-            String filename = "benchmark-" + result.getProfileName() + "-" + timestamp + ".json";
-            Path file = dir.resolve(filename);
-            ObjectMapper mapper = new ObjectMapper()
-                    .registerModule(new JavaTimeModule())
-                    .disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS)
-                    .enable(SerializationFeature.INDENT_OUTPUT);
-            mapper.writeValue(file.toFile(), result);
-            LOG.info("[BenchmarkRunner] BenchmarkResult persistido en " + file.toAbsolutePath());
+                    .withZone(ZoneOffset.UTC).format(result.getExecutedAt());
+            Path file = dir.resolve("benchmark-" + result.getProfileName() + "-" + timestamp + ".json");
+            objectMapper().writeValue(file.toFile(), result);
+            LOG.info("[BenchmarkRunner] BenchmarkResult saved to " + file.toAbsolutePath());
         } catch (IOException e) {
-            LOG.warning("[BenchmarkRunner] No se pudo persistir BenchmarkResult: " + e.getMessage());
+            LOG.warning("[BenchmarkRunner] Could not persist BenchmarkResult: " + e.getMessage());
         }
     }
 
-    /**
-     * Persiste el {@link ValidationReport} como JSON en
-     * {@code build/validation/VALIDATION_REPORT.json}.
-     */
+    /** Persists the validation report at {@code build/validation/VALIDATION_REPORT.json}. */
     public void persistValidationReport(ValidationReport report) {
         try {
             Path dir = Path.of("build", "validation");
             Files.createDirectories(dir);
-            Path file = dir.resolve("VALIDATION_REPORT.json");
-            ObjectMapper mapper = new ObjectMapper()
-                    .registerModule(new JavaTimeModule())
-                    .disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS)
-                    .enable(SerializationFeature.INDENT_OUTPUT);
-            mapper.writeValue(file.toFile(), report);
-            LOG.info("[BenchmarkRunner] ValidationReport persistido en " + file.toAbsolutePath());
+            objectMapper().writeValue(dir.resolve("VALIDATION_REPORT.json").toFile(), report);
+            LOG.info("[BenchmarkRunner] ValidationReport saved.");
         } catch (IOException e) {
-            LOG.warning("[BenchmarkRunner] No se pudo persistir ValidationReport: " + e.getMessage());
+            LOG.warning("[BenchmarkRunner] Could not persist ValidationReport: " + e.getMessage());
         }
     }
 
+    private ObjectMapper objectMapper() {
+        return new ObjectMapper()
+                .registerModule(new JavaTimeModule())
+                .disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS)
+                .enable(SerializationFeature.INDENT_OUTPUT);
+    }
+
     // -------------------------------------------------------------------------
-    // Helpers de validación
+    // Validation helpers
     // -------------------------------------------------------------------------
 
-    /** Devuelve la fracción de valores {@code true} en la lista. */
     private double passRate(List<Boolean> results) {
         if (results.isEmpty()) return 1.0;
-        long passed = results.stream().filter(Boolean::booleanValue).count();
-        return (double) passed / results.size();
+        return (double) results.stream().filter(Boolean::booleanValue).count() / results.size();
     }
 
     /**
-     * Ejecuta una query de escritura (INSERT/UPDATE/DELETE) sobre la BD espejo
-     * dentro de un savepoint y hace rollback para no alterar el estado.
-     *
-     * @return filas afectadas, o {@code 0} si la ejecución falla
+     * Executes a write statement inside a savepoint and rolls back immediately,
+     * returning the number of rows affected without mutating the mirror database.
      */
     private long countWriteAffectedRows(Connection conn, String sql) {
         Savepoint sp = null;
@@ -732,11 +624,11 @@ public class BenchmarkRunner {
                 conn.rollback(sp);
                 return count;
             } catch (SQLException e) {
-                LOG.warning("[Validation] Fallo al ejecutar write para cardinalidad: " + e.getMessage());
+                LOG.warning("[Validation] Write cardinality check failed: " + e.getMessage());
                 return 0;
             }
         } catch (SQLException e) {
-            LOG.warning("[Validation] Error de conexión en countWriteAffectedRows: " + e.getMessage());
+            LOG.warning("[Validation] Connection error in countWriteAffectedRows: " + e.getMessage());
             return 0;
         } finally {
             try { if (sp != null) conn.rollback(sp); } catch (SQLException ignored) {}
@@ -744,26 +636,47 @@ public class BenchmarkRunner {
         }
     }
 
+    /**
+     * Computes a combined CRC32 checksum over all user tables in the mirror database.
+     * Tables are discovered dynamically — no schema-specific names are assumed.
+     */
     private long computeTablesChecksum(Connection conn) throws SQLException {
         long combined = 0;
-        for (String table : List.of("products", "customers", "orders", "order_items", "inventory_log")) {
+        for (String table : dataGenerator.discoverUserTables(conn)) {
             try {
                 combined ^= dataGenerator.computeChecksum(conn, table);
-            } catch (SQLException ignored) {
-                // tabla puede no existir en schemas distintos al e-commerce
-            }
+            } catch (SQLException ignored) { /* table not accessible — skip */ }
         }
         return combined;
     }
 
     // -------------------------------------------------------------------------
-    // Acumulador de fase
+    // Utilities
+    // -------------------------------------------------------------------------
+
+    private double percentile(List<Long> sorted, double p) {
+        if (sorted.isEmpty()) return 0.0;
+        int index = (int) Math.ceil(p / 100.0 * sorted.size()) - 1;
+        return sorted.get(Math.max(0, Math.min(index, sorted.size() - 1)));
+    }
+
+    private void sleep(long ms) {
+        if (ms <= 0) return;
+        try {
+            Thread.sleep(ms);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // Phase accumulator
     // -------------------------------------------------------------------------
 
     private static class PhaseAccumulator {
-        final List<TransactionRecord>                          allSamples       = new ArrayList<>();
-        final List<BenchmarkResult.ThroughputSnapshot>         throughputSeries = new ArrayList<>();
-        final Map<String, List<BenchmarkResult.LatencySnapshot>> latencySeries  = new HashMap<>();
+        final List<TransactionRecord>                            allSamples       = new ArrayList<>();
+        final List<BenchmarkResult.ThroughputSnapshot>           throughputSeries = new ArrayList<>();
+        final Map<String, List<BenchmarkResult.LatencySnapshot>> latencySeries    = new HashMap<>();
         long   measurementStartMs = 0;
         long   lastTargetTps      = 0;
         double peakTps            = 0.0;
