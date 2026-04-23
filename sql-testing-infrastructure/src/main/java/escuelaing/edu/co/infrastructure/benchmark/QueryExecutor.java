@@ -10,46 +10,44 @@ import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.time.Instant;
+import java.util.Collections;
+import java.util.List;
 import java.util.Random;
 import java.util.logging.Logger;
 
 /**
- * Ejecuta una consulta SQL del perfil de carga contra la BD espejo y devuelve
- * un {@link TransactionRecord} con la latencia medida y el plan de ejecución.
+ * Executes a single SQL query against the mirror database and returns a
+ * {@link TransactionRecord} with the measured latency and execution plan cost.
  *
- * <h3>Estrategia de parámetros</h3>
- * <ol>
- *   <li><b>Primario:</b> usa el SQL capturado en Fase 2 almacenado en
- *       {@link LoadProfile.QueryStats#getCapturedSql()}.</li>
- *   <li><b>Fallback sintético:</b> si no hay SQL capturado, la ejecución se
- *       omite con un warning — no se usa SQL genérico ajeno al schema.</li>
- * </ol>
+ * <p>Responsibilities: resolve the SQL to run (captured SQL from Phase 2 takes
+ * precedence), capture the planner cost via {@code EXPLAIN ANALYZE}, bind
+ * synthetic parameters according to the access distribution, execute the
+ * statement, and record the elapsed time.</p>
  *
- * <h3>Plan de ejecución</h3>
- * <p>Captura el costo estimado del planificador con {@code EXPLAIN ANALYZE}
- * antes de ejecutar la consulta real. El costo queda registrado en
- * {@link TransactionRecord#getExecutionPlan()}.</p>
+ * <p>If no SQL is available for a query (neither captured nor provided), the
+ * execution is skipped with a warning rather than falling back to a generic
+ * statement unrelated to the user's schema.</p>
  */
 @Component
 public class QueryExecutor {
 
     private static final Logger LOG = Logger.getLogger(QueryExecutor.class.getName());
 
-    private static final String[] SYNTHETIC_CATEGORIES =
-            {"electronics", "clothing", "books", "sports", "home", "beauty", "toys", "food"};
+    private static final String ALPHANUM =
+            "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
 
     private final Random rng = new Random();
 
-    public QueryExecutor() {}
+    /** String parameter pool populated from the load profile before the benchmark runs. */
+    private List<String> stringPool = Collections.emptyList();
 
-    // -------------------------------------------------------------------------
-    // API pública
-    // -------------------------------------------------------------------------
+    /** Sets the string parameter pool built from production sanitized data. */
+    public void setStringPool(List<String> pool) {
+        this.stringPool = pool != null ? pool : Collections.emptyList();
+    }
 
-    /**
-     * Ejecuta la consulta asociada a {@code queryId} en la BD espejo con
-     * distribución de acceso UNIFORM (parámetros sintéticos uniformes).
-     */
+    // Public API
+
     public TransactionRecord execute(Connection conn,
                                      String queryId,
                                      LoadProfile.QueryStats stats,
@@ -59,21 +57,13 @@ public class QueryExecutor {
     }
 
     /**
-     * Ejecuta la consulta asociada a {@code queryId} en la BD espejo y
-     * retorna el registro de ejecución con latencia y plan de ejecución.
+     * Executes the query identified by {@code queryId} against the mirror database.
      *
-     * <p>Los parámetros sintéticos se vinculan según la distribución de acceso
-     * indicada. Con {@link TestProfile.AccessDistribution#ZIPF} los valores
-     * se sesgan hacia los registros más populares (hot spots), replicando el
-     * comportamiento de un flash sale (BenchPress §2 "time-evolving access skew").</p>
+     * <p>With {@link TestProfile.AccessDistribution#ZIPF}, integer parameters are
+     * skewed toward lower IDs so hot records receive more traffic than cold ones.</p>
      *
-     * @param conn       conexión abierta a la BD espejo
-     * @param queryId    identificador de la consulta (puente con Fase 1)
-     * @param stats      estadísticas del perfil de carga para esta consulta
-     * @param sql        SQL capturado en Fase 2 (puede ser null — se omite si stats tampoco tiene)
-     * @param accessDist distribución de acceso a los datos
-     * @param zipfAlpha  parámetro α de Zipf; ignorado si la distribución es UNIFORM
-     * @return registro de ejecución con latencia medida y plan capturado
+     * @param sql explicit SQL to run; if null, falls back to {@code stats.getCapturedSql()}
+     * @return record with measured latency and captured execution plan
      */
     public TransactionRecord execute(Connection conn,
                                      String queryId,
@@ -83,15 +73,14 @@ public class QueryExecutor {
                                      double zipfAlpha) {
         String resolvedSql = resolveSql(sql, stats);
         if (resolvedSql == null) {
-            LOG.warning("[QueryExecutor] Sin SQL para " + queryId + " — ejecución omitida.");
+            LOG.warning("[QueryExecutor] No SQL available for '" + queryId + "' — skipping.");
             return TransactionRecord.builder()
                     .queryId(queryId).sql("").latencyMs(0).timestamp(Instant.now()).build();
         }
 
-        String plan = captureExplainPlan(conn, resolvedSql);
-
-        Instant start  = Instant.now();
-        long startNs   = System.nanoTime();
+        String plan   = captureExplainPlan(conn, resolvedSql);
+        Instant start = Instant.now();
+        long startNs  = System.nanoTime();
 
         try (PreparedStatement ps = conn.prepareStatement(resolvedSql)) {
             bindSyntheticParameters(ps, accessDist, zipfAlpha);
@@ -102,11 +91,11 @@ public class QueryExecutor {
                 ps.executeUpdate();
             } else {
                 try (ResultSet rs = ps.executeQuery()) {
-                    while (rs.next()) { /* consumir el cursor */ }
+                    while (rs.next()) {}
                 }
             }
         } catch (SQLException e) {
-            LOG.warning("[QueryExecutor] Error ejecutando " + queryId + ": " + e.getMessage());
+            LOG.warning("[QueryExecutor] Error executing '" + queryId + "': " + e.getMessage());
         }
 
         long latencyMs = (System.nanoTime() - startNs) / 1_000_000;
@@ -120,26 +109,24 @@ public class QueryExecutor {
                 .build();
     }
 
-    // -------------------------------------------------------------------------
-    // Resolución de SQL
-    // -------------------------------------------------------------------------
+    // SQL resolution
 
     private String resolveSql(String sql, LoadProfile.QueryStats stats) {
-        if (sql != null && !sql.isBlank()) {
-            return sql;
-        }
+        if (sql != null && !sql.isBlank()) return sql;
         if (stats != null && stats.getCapturedSql() != null && !stats.getCapturedSql().isBlank()) {
             return stats.getCapturedSql();
         }
         return null;
     }
 
+    // Parameter binding
+
     /**
-     * Vincula parámetros sintéticos al {@link PreparedStatement}.
+     * Binds synthetic parameters to the prepared statement.
      *
-     * <p>Con {@link TestProfile.AccessDistribution#ZIPF} los valores se sesgan
-     * hacia los registros más populares usando un generador Zipf inverso,
-     * simulando hot spots de acceso (BenchPress §2, Dyn-YCSB Fig. 1).</p>
+     * <p>String parameters receive a random sample value. Integer parameters use
+     * UNIFORM or ZIPF distribution: with ZIPF, lower IDs are selected more
+     * frequently — P(k) ∝ k^{-α}.</p>
      */
     private void bindSyntheticParameters(PreparedStatement ps,
                                           TestProfile.AccessDistribution dist,
@@ -148,15 +135,17 @@ public class QueryExecutor {
             java.sql.ParameterMetaData meta = ps.getParameterMetaData();
             for (int i = 1; i <= meta.getParameterCount(); i++) {
                 int sqlType;
-                try { sqlType = meta.getParameterType(i); }
-                catch (SQLException ex) { sqlType = java.sql.Types.INTEGER; }
-
+                try {
+                    sqlType = meta.getParameterType(i);
+                } catch (SQLException ex) {
+                    sqlType = java.sql.Types.INTEGER;
+                }
                 switch (sqlType) {
                     case java.sql.Types.VARCHAR,
                          java.sql.Types.CHAR,
                          java.sql.Types.LONGVARCHAR,
                          java.sql.Types.NVARCHAR ->
-                        ps.setString(i, SYNTHETIC_CATEGORIES[rng.nextInt(SYNTHETIC_CATEGORIES.length)]);
+                            ps.setString(i, randomString());
                     default -> {
                         int value = (dist == TestProfile.AccessDistribution.ZIPF)
                                 ? zipfInt(500, zipfAlpha)
@@ -166,18 +155,27 @@ public class QueryExecutor {
                 }
             }
         } catch (SQLException ignored) {
-            // Algunos drivers lanzan excepción en getParameterMetaData — ignorar
+            // Some JDBC drivers throw on getParameterMetaData — safe to skip binding
         }
     }
 
     /**
-     * Genera un entero aleatorio sesgado según la distribución Zipf(α) en [1, n].
+     * Returns a string value from the pool if available, or a random alphanumeric
+     * string of length 6–12 as fallback.
+     */
+    private String randomString() {
+        if (!stringPool.isEmpty()) return stringPool.get(rng.nextInt(stringPool.size()));
+        int len = 6 + rng.nextInt(7);
+        StringBuilder sb = new StringBuilder(len);
+        for (int i = 0; i < len; i++) sb.append(ALPHANUM.charAt(rng.nextInt(ALPHANUM.length())));
+        return sb.toString();
+    }
+
+    /**
+     * Returns a Zipf-distributed integer in [1, n].
      *
-     * <p>P(k) ∝ k^{-α}: los valores bajos (registros "populares") se seleccionan
-     * con mayor frecuencia. Para α=1.0 el top-20 % recibe ~80 % de los accesos.</p>
-     *
-     * <p>Implementación por transformada inversa sobre CDF normalizada (O(n) por llamada,
-     * aceptable para n=1000 en el contexto de un benchmark).</p>
+     * <p>P(k) ∝ k^{-α}: lower values are selected more often, simulating hot-record access.
+     * Uses inverse CDF sampling — O(n) per call, acceptable for n≤1000.</p>
      */
     private int zipfInt(int n, double alpha) {
         double sum = 0;
@@ -191,9 +189,11 @@ public class QueryExecutor {
         return n;
     }
 
-    // -------------------------------------------------------------------------
+    private int syntheticInt(int min, int max) {
+        return min + rng.nextInt(max - min + 1);
+    }
+
     // EXPLAIN ANALYZE
-    // -------------------------------------------------------------------------
 
     private String captureExplainPlan(Connection conn, String sql) {
         try (PreparedStatement ps = conn.prepareStatement("EXPLAIN ANALYZE " + sql)) {
@@ -203,34 +203,29 @@ public class QueryExecutor {
             }
             return sb.toString();
         } catch (SQLException e) {
-            LOG.fine("[QueryExecutor] EXPLAIN ANALYZE no disponible: " + e.getMessage());
+            LOG.fine("[QueryExecutor] EXPLAIN ANALYZE unavailable: " + e.getMessage());
             return null;
         }
     }
 
     /**
-     * Extrae el costo estimado del planificador del texto del plan EXPLAIN.
-     * PostgreSQL reporta la línea {@code cost=X..Y} en el nodo raíz.
+     * Parses the estimated total cost from an EXPLAIN ANALYZE output.
+     * PostgreSQL reports {@code cost=X..Y} on the root node; this method returns Y.
      *
-     * @param explainOutput salida de EXPLAIN ANALYZE
-     * @return costo estimado total (el valor después de {@code ..}), o 0 si no se puede parsear
+     * @return estimated total cost, or 0 if the output cannot be parsed
      */
     public static double extractPlanCost(String explainOutput) {
         if (explainOutput == null || explainOutput.isBlank()) return 0.0;
         int idx = explainOutput.indexOf("cost=");
         if (idx < 0) return 0.0;
         try {
-            String sub    = explainOutput.substring(idx + 5);
-            int dotDot    = sub.indexOf("..");
-            int space     = sub.indexOf(' ');
+            String sub = explainOutput.substring(idx + 5);
+            int dotDot = sub.indexOf("..");
+            int space  = sub.indexOf(' ');
             if (dotDot < 0 || space < 0) return 0.0;
             return Double.parseDouble(sub.substring(dotDot + 2, space));
         } catch (NumberFormatException e) {
             return 0.0;
         }
-    }
-
-    private int syntheticInt(int min, int max) {
-        return min + rng.nextInt(max - min + 1);
     }
 }

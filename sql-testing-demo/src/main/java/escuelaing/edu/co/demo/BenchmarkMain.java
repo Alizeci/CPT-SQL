@@ -29,8 +29,8 @@ import java.util.List;
  *
  * <h3>Exit codes</h3>
  * <ul>
- *   <li>{@code 0} — no critical degradations (warnings may be present).</li>
- *   <li>{@code 1} — SLA violated (P95_EXCEEDED) or execution plan changed (PLAN_CHANGED).</li>
+ *   <li>{@code 0} — no blocking degradations (BASELINE_EXCEEDED warnings may be present).</li>
+ *   <li>{@code 1} — P95_EXCEEDED, SLO_PROXIMITY, or PLAN_CHANGED detected.</li>
  * </ul>
  *
  * <h3>Key parameters</h3>
@@ -162,19 +162,12 @@ public class BenchmarkMain {
                 System.exit(1);
             }
 
-            // --- Update baseline based on execution context ---
-            // pull_request event → write baseline-candidate.json only (cached by workflow,
-            // committed after merge without re-running the benchmark).
-            // push or local run → update baseline.json directly.
-            boolean isPullRequest = "pull_request".equals(System.getenv("GITHUB_EVENT_NAME"));
+            // --- Update baseline on PASS ---
+            // baseline.json is updated by update-baseline.yml (post-merge push),
+            // not during PR runs — keeping the baseline on approved code only.
             if (result.getOverallVerdict() == BenchmarkResult.Verdict.PASS) {
-                if (isPullRequest) {
-                    baselineManager.saveAs(result, "baseline-candidate.json");
-                    System.out.println("\n[BenchmarkMain] PR check — baseline-candidate.json written for post-merge.");
-                } else {
-                    baselineManager.save(result);
-                    System.out.println("\n[BenchmarkMain] baseline.json updated (post-merge).");
-                }
+                baselineManager.save(result);
+                System.out.println("\n[BenchmarkMain] baseline.json updated.");
             }
 
             System.out.println("[BenchmarkMain] Pipeline OK."

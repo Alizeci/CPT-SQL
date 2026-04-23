@@ -15,21 +15,17 @@ import java.util.Map;
 import java.util.logging.Logger;
 
 /**
- * Gestiona la línea base de referencia del motor de benchmark (Fase 3).
+ * Manages the reference baseline for the benchmark engine (Phase 3).
  *
- * <h3>Línea base</h3>
- * <p>La línea base es el conjunto de métricas ({@link BenchmarkResult.QueryResult})
- * de la última ejecución aprobada, persistida en {@code baseline.json} en la
- * raíz del proyecto. El {@link DegradationDetector} la usa para detectar
- * degradaciones de tipo {@code BASELINE_EXCEEDED} y {@code PLAN_CHANGED}.</p>
+ * <p>The baseline is the set of {@link BenchmarkResult.QueryResult} metrics from the
+ * last approved run, persisted in {@code baseline.json} at the project root.
+ * {@link DegradationDetector} uses it to detect {@code BASELINE_EXCEEDED} and
+ * {@code PLAN_CHANGED} degradations.</p>
  *
- * <h3>Versionado</h3>
- * <p>Cada actualización de la línea base escribe en {@code baseline.json}
- * sobreescribiendo el anterior. El historial queda en el repositorio git,
- * de modo que cualquier versión anterior puede recuperarse con
+ * <p>Each save overwrites the previous {@code baseline.json}. History is preserved
+ * in git — any prior version can be retrieved with
  * {@code git show HEAD~n:baseline.json}.</p>
  *
- * <h3>Configuración (application.properties)</h3>
  * <pre>
  * loadtest.baseline.path=baseline.json
  * </pre>
@@ -50,21 +46,18 @@ public class BaselineManager {
                 .disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS);
     }
 
-    // -------------------------------------------------------------------------
-    // API pública
-    // -------------------------------------------------------------------------
+    // Public API
 
     /**
-     * Lee la línea base almacenada y retorna un mapa {@code queryId →
-     * QueryResult}. Devuelve un mapa vacío si {@code baseline.json} no existe
-     * aún (primera ejecución).
+     * Reads the stored baseline and returns a {@code queryId → QueryResult} map.
+     * Returns an empty map if {@code baseline.json} does not yet exist (first run).
      *
-     * @return mapa inmutable con la línea base actual
+     * @return immutable map with the current baseline
      */
     public Map<String, BenchmarkResult.QueryResult> load() {
         File file = new File(baselinePath);
         if (!file.exists()) {
-            LOG.info("[BaselineManager] baseline.json no encontrado — primera ejecución.");
+            LOG.info("[BaselineManager] baseline.json not found — first run.");
             return Collections.emptyMap();
         }
         try {
@@ -73,16 +66,16 @@ public class BaselineManager {
                     ? Collections.unmodifiableMap(baseline.queries)
                     : Collections.emptyMap();
         } catch (IOException e) {
-            LOG.warning("[BaselineManager] No se pudo leer baseline.json: " + e.getMessage());
+            LOG.warning("[BaselineManager] Could not read baseline.json: " + e.getMessage());
             return Collections.emptyMap();
         }
     }
 
     /**
-     * Persiste el {@code result} como nueva línea base en {@code baseline.json}.
-     * Solo debe llamarse cuando el benchmark produce un veredicto PASS.
+     * Persists {@code result} as the new baseline in {@code baseline.json}.
+     * Should only be called when the benchmark produces a PASS verdict.
      *
-     * @param result resultado aprobado que se convierte en la nueva línea base
+     * @param result approved result that becomes the new baseline
      */
     public void save(BenchmarkResult result) {
         saveAs(result, baselinePath);
@@ -97,20 +90,17 @@ public class BaselineManager {
 
         try {
             mapper.writerWithDefaultPrettyPrinter().writeValue(new File(path), baseline);
-            LOG.info("[BaselineManager] " + path + " actualizado (commit=" + result.getCommitSha() + ").");
+            LOG.info("[BaselineManager] " + path + " updated (commit=" + result.getCommitSha() + ").");
         } catch (IOException e) {
-            throw new RuntimeException("No se pudo guardar " + path, e);
+            throw new RuntimeException("Could not save " + path, e);
         }
     }
 
-    // -------------------------------------------------------------------------
-    // Modelo de serialización
-    // -------------------------------------------------------------------------
+    // Serialization model
 
     /**
-     * Estructura interna del archivo {@code baseline.json}.
-     * Usa campos públicos para que Jackson pueda des/serializar sin
-     * dependencias adicionales de configuración.
+     * Internal structure of {@code baseline.json}.
+     * Uses public fields so Jackson can serialize/deserialize without extra configuration.
      */
     public static class BaselineFile {
         public String commitSha;
