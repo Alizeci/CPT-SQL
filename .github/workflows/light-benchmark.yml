@@ -1,37 +1,37 @@
 name: Light Benchmark — PR Degradation Gate
 
-# Runs on every Pull Request targeting main, develop or qa.
-# Detects performance degradations introduced by the PR before merge.
-# Blocks merge if P95_EXCEEDED or SLO_PROXIMITY is detected.
-#
-# Phase 2 behaviour:
-#   - If load-profile.json exists in the repo: capture PR SQL into a temporary
-#     load-profile-pr.json (20s). Benchmark uses production stats from the repo
-#     profile + SQL from the PR profile. The repo file is never modified.
-#   - If load-profile.json does not exist: emit a non-blocking warning, run a
-#     full capture (same as capture-production-profile) to generate the profile,
-#     and continue. The generated file is used for this run only — it is NOT
-#     committed. The team should run capture-production-profile to persist it.
-#
-# Baseline: baseline.json (independent from nightly).
-# Profile:  light — 10s warmup + 30s measurement, 10 TPS, 10k synthetic rows.
 on:
-  pull_request:
-    branches: [main, develop, qa]
-
-concurrency:
-  group: light-benchmark-${{ github.event.pull_request.number }}
-  cancel-in-progress: false
+  workflow_call:
+    inputs:
+      schema-script:
+        description: 'Path to DDL script for the mirror database'
+        required: true
+        type: string
+      jar-path:
+        description: 'Path to the executable JAR'
+        required: false
+        type: string
+        default: 'build/libs/app.jar'
+      rows-per-table:
+        description: 'Synthetic rows per table for the mirror DB'
+        required: false
+        type: number
+        default: 10000
+    secrets:
+      DB_URL:
+        required: true
+      DB_USER:
+        required: true
+      DB_PASSWORD:
+        required: true
 
 jobs:
   benchmark:
     runs-on: self-hosted
 
     steps:
-      # ── 1. Checkout ──────────────────────────────────────────────────────────
       - uses: actions/checkout@v4
 
-      # ── 2. Cleanup ───────────────────────────────────────────────────────────
       - name: Remove previous mirror container
         run: docker rm -f cpt-sql-mirror || true
 
@@ -40,66 +40,44 @@ jobs:
           docker image prune -f
           docker volume prune -f
 
-      # ── Phase 1: compile and generate queries.json ───────────────────────────
-      - name: "Phase 1 — Compile and generate queries.json"
-        run: ./gradlew :sql-testing-demo:compileJava
+      - name: Phase 1 — Compile and generate queries.json
+        run: ./gradlew compileJava
 
       - name: Build executable JAR
-        run: ./gradlew :sql-testing-demo:bootJar
+        run: ./gradlew bootJar
 
-      # ── Phase 2: capture PR SQL ───────────────────────────────────────────────
-      # Case A: load-profile.json exists in the repo.
-      #   Run the simulator for 20s to capture the PR's SQL into load-profile-pr.json.
-      #   The repo file is not modified. Phases 3+4 receive both files separately.
-      #
-      # Case B: load-profile.json does not exist.
-      #   Emit a non-blocking warning. Run a full capture (120s) to generate a
-      #   temporary profile for this run. The team should run
-      #   capture-production-profile to persist official production statistics.
-      - name: "Phase 2 — Capture PR SQL"
+      - name: Phase 2 — Capture PR SQL
         run: |
           if [ -f "load-profile.json" ]; then
             echo "[Phase 2] load-profile.json found — capturing PR SQL only (20s)."
-            SIMULATION_SECS=20 ./gradlew :sql-testing-demo:runSimulator
+            SIMULATION_SECS=20 ./gradlew runSimulator
             mv load-profile.json load-profile-pr.json
             git checkout -- load-profile.json
             echo "LOAD_PROFILE_PATH=load-profile.json" >> $GITHUB_ENV
             echo "PR_SQL_PATH=load-profile-pr.json"   >> $GITHUB_ENV
           else
-            echo "::warning::load-profile.json not found in repository." \
-                 "Running a temporary capture — production statistics may not be representative." \
-                 "Run the 'capture-production-profile' workflow to generate official statistics."
-            SIMULATION_SECS=120 ./gradlew :sql-testing-demo:runSimulator
+            echo "::warning::load-profile.json not found. Running temporary capture."
+            SIMULATION_SECS=120 ./gradlew runSimulator
             echo "LOAD_PROFILE_PATH=load-profile.json" >> $GITHUB_ENV
             echo "PR_SQL_PATH=load-profile.json"       >> $GITHUB_ENV
           fi
         env:
-          DB_URL: jdbc:postgresql://localhost:5432/ecommerce_demo
-          DB_USER: ${{ secrets.DEMO_DB_USER }}
-          DB_PASSWORD: ${{ secrets.DEMO_DB_PASSWORD }}
+          DB_URL: ${{ secrets.DB_URL }}
+          DB_USER: ${{ secrets.DB_USER }}
+          DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
 
-      # ── Phases 3+4: benchmark and degradation detection ──────────────────────
-      # BenchmarkMain:
-      #   1. Reads load-profile stats from LOAD_PROFILE_PATH
-      #   2. Reads captured SQL from PR_SQL_PATH
-      #   3. Provisions mirror DB (Docker)
-      #   4. Generates synthetic data (SyntheticDataGenerator — DPSDG)
-      #   5. Runs benchmark with TestProfile "light" (30s, 10 TPS, UNIFORM)
-      #   6. Compares against baseline.json (DegradationDetector)
-      #   7. Exits with code 1 if degradations detected → blocks the PR
-      - name: "Phases 3+4 — Benchmark and degradation detection"
+      - name: Phases 3+4 — Benchmark and degradation detection
         run: |
-          java -jar sql-testing-demo/build/libs/sql-testing-demo.jar \
+          java -jar ${{ inputs.jar-path }} \
             --loadtest.benchmark.testProfile=light \
-            --loadtest.synthetic.rowsPerTable=10000 \
+            --loadtest.synthetic.rowsPerTable=${{ inputs.rows-per-table }} \
             --loadtest.baseline.path=baseline.json \
             --loadtest.profile.path="$LOAD_PROFILE_PATH" \
             --loadtest.profile.sqlPath="$PR_SQL_PATH" \
-            --loadtest.mirror.schema.script=sql-testing-demo/src/main/resources/schema-ecommerce.sql
+            --loadtest.mirror.schema.script=${{ inputs.schema-script }}
         env:
           GITHUB_SHA: ${{ github.sha }}
 
-      # ── Post warnings as PR comment ───────────────────────────────────────────
       - name: Post warnings on PR
         if: always() && hashFiles('benchmark-warnings.txt') != ''
         run: |
@@ -110,12 +88,11 @@ jobs:
             -d "{\"body\": $BODY}" \
             "https://api.github.com/repos/${{ github.repository }}/issues/${{ github.event.pull_request.number }}/comments"
 
-      # ── Upload result artifacts ───────────────────────────────────────────────
       - name: Upload result artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: benchmark-degradation-${{ github.sha }}
+          name: benchmark-${{ github.sha }}
           path: |
             load-profile.json
             load-profile-pr.json
