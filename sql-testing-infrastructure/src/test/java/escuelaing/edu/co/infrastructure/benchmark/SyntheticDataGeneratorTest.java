@@ -11,8 +11,7 @@ import java.util.List;
 import java.util.Map;
 
 import static escuelaing.edu.co.infrastructure.benchmark.SyntheticDataGenerator.ColumnCategory.FEATURE;
-import static escuelaing.edu.co.infrastructure.benchmark.SyntheticDataGenerator.ColumnCategory.TRANSACTION_ID;
-import static escuelaing.edu.co.infrastructure.benchmark.SyntheticDataGenerator.ColumnCategory.USER_ID;
+import static escuelaing.edu.co.infrastructure.benchmark.SyntheticDataGenerator.ColumnCategory.IDENTIFIER;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.within;
@@ -38,19 +37,19 @@ class SyntheticDataGeneratorTest {
     // -------------------------------------------------------------------------
 
     @Test
-    @DisplayName("user_id y customer_id deben clasificarse como USER_ID")
+    @DisplayName("user_id y customer_id deben clasificarse como IDENTIFIER")
     void classifyColumn_userIdColumns() {
-        assertThat(generator.classifyColumn("orders", "user_id")).isEqualTo(USER_ID);
-        assertThat(generator.classifyColumn("orders", "customer_id")).isEqualTo(USER_ID);
-        assertThat(generator.classifyColumn("orders", "USER_ID")).isEqualTo(USER_ID);   // insensible a mayúsculas
+        assertThat(generator.classifyColumn("orders", "user_id")).isEqualTo(IDENTIFIER);
+        assertThat(generator.classifyColumn("orders", "customer_id")).isEqualTo(IDENTIFIER);
+        assertThat(generator.classifyColumn("orders", "USER_ID")).isEqualTo(IDENTIFIER);
     }
 
     @Test
-    @DisplayName("columnas _id (no user/customer) deben clasificarse como TRANSACTION_ID")
+    @DisplayName("columnas _id deben clasificarse como IDENTIFIER")
     void classifyColumn_transactionIdColumns() {
-        assertThat(generator.classifyColumn("orders",      "id")).isEqualTo(TRANSACTION_ID);
-        assertThat(generator.classifyColumn("order_items", "order_id")).isEqualTo(TRANSACTION_ID);
-        assertThat(generator.classifyColumn("order_items", "product_id")).isEqualTo(TRANSACTION_ID);
+        assertThat(generator.classifyColumn("orders",      "id")).isEqualTo(IDENTIFIER);
+        assertThat(generator.classifyColumn("order_items", "order_id")).isEqualTo(IDENTIFIER);
+        assertThat(generator.classifyColumn("order_items", "product_id")).isEqualTo(IDENTIFIER);
     }
 
     @Test
@@ -137,7 +136,7 @@ class SyntheticDataGeneratorTest {
     @DisplayName("insertRealSanitizedData con perfil null no debe lanzar excepción")
     void insertRealSanitizedData_nullProfile_doesNotThrow() {
         Connection conn = mock(Connection.class);
-        assertThatCode(() -> generator.insertRealSanitizedData(conn, null))
+        assertThatCode(() -> generator.insertRealSanitizedData(conn, null, List.of(), Map.of()))
                 .doesNotThrowAnyException();
     }
 
@@ -151,7 +150,7 @@ class SyntheticDataGeneratorTest {
                 .queries(Map.of())
                 .build();
 
-        assertThatCode(() -> generator.insertRealSanitizedData(conn, emptyProfile))
+        assertThatCode(() -> generator.insertRealSanitizedData(conn, emptyProfile, List.of(), Map.of()))
                 .doesNotThrowAnyException();
     }
 
@@ -163,7 +162,7 @@ class SyntheticDataGeneratorTest {
                 .queryId("q1")
                 .p95Ms(50.0)
                 .capturedSql("SELECT 1")
-                .sanitizedRealData(null) // sin datos — caso normal para INSERT/UPDATE
+                .sanitizedRealData(null)
                 .build();
         LoadProfile profile = LoadProfile.builder()
                 .generatedAt(Instant.now())
@@ -171,7 +170,7 @@ class SyntheticDataGeneratorTest {
                 .queries(Map.of("q1", stats))
                 .build();
 
-        assertThatCode(() -> generator.insertRealSanitizedData(conn, profile))
+        assertThatCode(() -> generator.insertRealSanitizedData(conn, profile, List.of(), Map.of()))
                 .doesNotThrowAnyException();
     }
 
@@ -189,7 +188,7 @@ class SyntheticDataGeneratorTest {
                 .queries(Map.of("q1", stats))
                 .build();
 
-        assertThatCode(() -> generator.insertRealSanitizedData(conn, profile))
+        assertThatCode(() -> generator.insertRealSanitizedData(conn, profile, List.of(), Map.of()))
                 .doesNotThrowAnyException();
     }
 }
