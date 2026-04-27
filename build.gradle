@@ -10,6 +10,7 @@ description = 'CPT-SQL: Continuous Performance Testing for SQL queries across th
 
 subprojects {
     apply plugin: 'java'
+    apply plugin: 'maven-publish'
 
     java {
         toolchain {
@@ -23,5 +24,19 @@ subprojects {
 
     test {
         useJUnitPlatform()
+    }
+
+    publishing {
+        publications {
+            mavenJava(MavenPublication) {
+                from components.java
+                groupId    = 'escuelaing.edu.co'
+                artifactId = project.name
+                version    = '0.0.1-SNAPSHOT'
+            }
+        }
+        repositories {
+            mavenLocal()
+        }
     }
 }

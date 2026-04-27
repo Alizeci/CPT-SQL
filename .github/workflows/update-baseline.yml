@@ -1,51 +1,60 @@
-name: Baseline — Actualizar post-merge
+name: Baseline — Update post-merge
 
-# Corre cuando se integra un PR a main o develop.
-# Re-ejecuta el benchmark con el código mergeado y actualiza baseline.json.
 on:
-  push:
-    branches: [main, develop, qa]
-    paths-ignore:
-      - 'baseline.json'
-      - 'load-profile.json'
+  workflow_call:
+    inputs:
+      schema-script:
+        description: 'Path to DDL script for the mirror database'
+        required: true
+        type: string
+      jar-path:
+        description: 'Path to the executable JAR'
+        required: false
+        type: string
+        default: 'build/libs/app.jar'
+      rows-per-table:
+        description: 'Synthetic rows per table for the mirror DB'
+        required: false
+        type: number
+        default: 10000
+      test-profile:
+        description: 'TestProfile to use (light | normal)'
+        required: false
+        type: string
+        default: 'light'
 
 jobs:
-  actualizar-baseline:
+  update-baseline:
     runs-on: self-hosted
 
     steps:
-      # ── 1. Checkout ──────────────────────────────────────────────────────────
       - uses: actions/checkout@v4
 
-      # ── 2. Limpieza ───────────────────────────────────────────────────────────
-      - name: Eliminar contenedor espejo previo
+      - name: Remove previous mirror container
         run: docker rm -f cpt-sql-mirror || true
 
-      - name: Limpiar disco (imágenes y volúmenes Docker sin uso)
+      - name: Prune unused Docker images and volumes
         run: |
           docker image prune -f
           docker volume prune -f
 
-      # ── 3. Compilar ───────────────────────────────────────────────────────────
-      - name: Compilar artefacto ejecutable (fat JAR)
-        run: ./gradlew :sql-testing-demo:bootJar
+      - name: Build executable JAR
+        run: ./gradlew bootJar
 
-      # ── 4. Ejecutar benchmark y actualizar baseline ───────────────────────────
-      - name: Ejecutar benchmark y generar nuevo baseline
+      - name: Run benchmark and update baseline
         run: |
-          java -jar sql-testing-demo/build/libs/sql-testing-demo.jar \
-            --loadtest.benchmark.testProfile=light \
-            --loadtest.synthetic.rowsPerTable=10000 \
+          java -jar ${{ inputs.jar-path }} \
+            --loadtest.benchmark.testProfile=${{ inputs.test-profile }} \
+            --loadtest.synthetic.rowsPerTable=${{ inputs.rows-per-table }} \
             --loadtest.baseline.path=baseline.json \
-            --loadtest.mirror.schema.script=sql-testing-demo/src/main/resources/schema-ecommerce.sql
+            --loadtest.mirror.schema.script=${{ inputs.schema-script }}
         env:
           GITHUB_SHA: ${{ github.sha }}
 
-      # ── 5. Registrar baseline actualizado en el repositorio ───────────────────
-      - name: Registrar baseline actualizado en el repositorio
+      - name: Commit updated baseline
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add baseline.json
-          git diff --staged --quiet || git commit -m "chore: actualizar baseline.json post-merge [skip ci]"
+          git diff --staged --quiet || git commit -m "chore: update baseline.json post-merge [skip ci]"
           git push

@@ -1,51 +1,39 @@
-name: Captura — Perfil de producción (load-profile.json)
-
-# Captura métricas y SQL reales desde main (código de producción).
-# Genera load-profile.json con p95Ms, meanMs, callsPerMinute y capturedSql.
-# El archivo se commitea al repositorio y sirve de base para los benchmarks en CI.
-#
-# CUÁNDO CORRE:
-# - Al llegar código nuevo a main (push)
-# - Nightly: cada noche a las 2 AM UTC (datos frescos)
-# - Manual:  botón "Run workflow" en GitHub → Actions
+name: Capture — Production load profile
 
 on:
-  push:
-    branches: [main]
-  workflow_dispatch:
+  workflow_call:
     inputs:
-      simulation_secs:
-        description: 'Duración de la simulación en segundos (default: 120)'
+      simulation-secs:
+        description: 'Simulation duration in seconds'
         required: false
-        default: '120'
-  schedule:
-    - cron: '0 2 * * *'  # 2 AM UTC cada noche
+        type: number
+        default: 120
+    secrets:
+      DB_URL:
+        required: true
+      DB_USER:
+        required: true
+      DB_PASSWORD:
+        required: true
 
 jobs:
-  capturar-perfil:
+  capture-profile:
     runs-on: self-hosted
 
     steps:
-      # ── 1. Checkout ──────────────────────────────────────────────────────────
       - uses: actions/checkout@v4
 
-      # ── 2. Compilar ──────────────────────────────────────────────────────────
-      - name: "Fase 1 — Compilar y generar queries.json"
-        run: ./gradlew :sql-testing-demo:compileJava
+      - name: Phase 1 — Compile and generate queries.json
+        run: ./gradlew compileJava
 
-      # ── 3. Capturar tráfico ───────────────────────────────────────────────────
-      # EcommerceSimulator conecta al PostgreSQL local (stand-in de producción),
-      # ejecuta las queries con JdbcWrapper activo y mide latencias reales.
-      # Genera load-profile.json con p95Ms, meanMs, callsPerMinute y capturedSql.
-      - name: "Fase 2 — Capturar perfil de producción"
-        run: ./gradlew :sql-testing-demo:runSimulator
+      - name: Phase 2 — Capture load profile
+        run: SIMULATION_SECS=${{ inputs.simulation-secs }} ./gradlew runSimulator
         env:
-          DB_URL: jdbc:postgresql://localhost:5432/ecommerce_demo
-          DB_USER: ${{ secrets.DEMO_DB_USER }}
-          DB_PASSWORD: ${{ secrets.DEMO_DB_PASSWORD }}
+          DB_URL: ${{ secrets.DB_URL }}
+          DB_USER: ${{ secrets.DB_USER }}
+          DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
 
-      # ── 4. Verificar que load-profile.json tiene latencias reales ─────────────
-      - name: Verificar latencias capturadas
+      - name: Verify captured latencies
         run: |
           P95=$(python3 -c "
           import json, sys
@@ -54,15 +42,13 @@ jobs:
           vals = [q['p95Ms'] for q in p['queries'].values()]
           print(max(vals))
           ")
-          echo "p95Ms máximo capturado: ${P95}ms"
+          echo "Max p95Ms captured: ${P95}ms"
           if [ "$P95" = "0.0" ] || [ "$P95" = "0" ]; then
-            echo "❌ Todas las latencias son 0ms — la captura falló"
+            echo "All latencies are 0ms — capture failed"
             exit 1
           fi
-          echo "✅ Latencias capturadas correctamente"
 
-      # ── 5. Commitear load-profile.json al repositorio ─────────────────────────
-      - name: Registrar load-profile.json en el repositorio
+      - name: Commit load-profile.json
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
