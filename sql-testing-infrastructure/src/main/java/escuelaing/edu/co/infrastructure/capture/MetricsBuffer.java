@@ -44,16 +44,16 @@ public class MetricsBuffer {
     private static final Logger LOG = Logger.getLogger(MetricsBuffer.class.getName());
 
     @Value("${loadtest.buffer.queueCapacity:10000}")
-    private int queueCapacity;
+    private int queueCapacity = 10000;
 
     @Value("${loadtest.buffer.flushIntervalMs:500}")
-    private long flushIntervalMs;
+    private long flushIntervalMs = 500;
 
     @Value("${loadtest.buffer.batchSize:200}")
-    private int batchSize;
+    private int batchSize = 200;
 
     @Value("${loadtest.buffer.flushedCapacity:50000}")
-    private int flushedCapacity;
+    private int flushedCapacity = 50000;
 
     private BlockingQueue<TransactionRecord> queue;
 
