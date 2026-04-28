@@ -10,6 +10,7 @@ import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.sql.Savepoint;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
@@ -314,11 +315,13 @@ public class SyntheticDataGenerator {
                 if (row == null || row.isEmpty()) continue;
                 String target = findBestMatchingTable(row.keySet(), tableSchema);
                 if (target == null) continue;
+                Savepoint sp = conn.setSavepoint();
                 try {
                     insertRealRow(conn, target, row, tableSchema.get(target), dpStats);
                     totalInserted++;
                 } catch (SQLException e) {
                     LOG.warning("[SyntheticData] Real row discarded: " + e.getMessage());
+                    conn.rollback(sp);
                 }
             }
         }
