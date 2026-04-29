@@ -14,6 +14,9 @@ import java.sql.Savepoint;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.HashSet;
+import java.util.Iterator;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Random;
@@ -43,7 +46,10 @@ import java.util.zip.CRC32;
  * {@link java.util.Random}, making two runs with the same seed byte-identical.</p>
  *
  * <p>Tables are discovered via {@code INFORMATION_SCHEMA.tables} — the generator
- * is schema-agnostic and works with any PostgreSQL schema without modification.</p>
+ * is schema-agnostic and works with any PostgreSQL schema without modification.
+ * Foreign key constraints are discovered from {@code INFORMATION_SCHEMA} and used
+ * to sort tables topologically (parents before children) and to generate FK column
+ * values that reference existing rows in the parent table.</p>
  *
  * <pre>
  * loadtest.synthetic.rowsPerTable=500
@@ -112,6 +118,13 @@ public class SyntheticDataGenerator {
 
     /** Tables populated by the last {@link #populate} call. */
     private int lastTablesPopulated = 0;
+
+    /**
+     * Cache of primary key values per table, populated lazily during {@link #populate}.
+     * Cleared at the start of each populate call so stale IDs from a previous mirror
+     * run are never reused.
+     */
+    private final Map<String, List<Integer>> pkCache = new HashMap<>();
 
     /** Reseeds {@code rng} with the Spring-injected {@code seed}. */
     @PostConstruct
@@ -212,25 +225,38 @@ public class SyntheticDataGenerator {
      * Tables are discovered automatically via {@code INFORMATION_SCHEMA} — no schema
      * configuration is required.
      *
+     * <p>Foreign key constraints are discovered and used to:</p>
+     * <ol>
+     *   <li>Sort tables topologically so parent tables are always populated before their
+     *       dependents, avoiding FK violations during insertion.</li>
+     *   <li>Generate FK column values by selecting a random existing ID from the parent
+     *       table instead of an arbitrary pseudonym that would violate the constraint.</li>
+     * </ol>
+     *
      * @param conn    open connection to the mirror database
      * @param profile Phase 2 load profile used to calibrate distributions
      */
     public void populate(Connection conn, LoadProfile profile) throws SQLException {
         LOG.info("[SyntheticData] Starting mirror database population...");
+        pkCache.clear();
         conn.setAutoCommit(false);
 
         List<String> tables = discoverUserTables(conn);
         lastTablesPopulated = tables.size();
 
-        Map<String, double[]> dpStats = buildDpStats(profile);
-        insertRealSanitizedData(conn, profile, tables, dpStats);
+        Map<String, Map<String, String>> fkConstraints = discoverFkConstraints(conn);
+        List<String> sortedTables = topologicalSort(tables, fkConstraints);
 
-        for (String table : tables) {
+        Map<String, double[]> dpStats = buildDpStats(profile);
+        insertRealSanitizedData(conn, profile, sortedTables, dpStats, fkConstraints);
+
+        for (String table : sortedTables) {
             Savepoint sp = conn.setSavepoint();
             try {
                 List<ColumnMeta> cols = describeTable(conn, table);
                 if (cols.isEmpty()) continue;
-                insertRows(conn, table, cols, rowsPerTable, dpStats);
+                Map<String, String> fkCols = fkConstraints.getOrDefault(table, Collections.emptyMap());
+                insertRows(conn, table, cols, rowsPerTable, dpStats, fkCols);
             } catch (SQLException e) {
                 LOG.warning("[SyntheticData] Could not populate '" + table + "': " + e.getMessage());
                 conn.rollback(sp);
@@ -263,6 +289,77 @@ public class SyntheticDataGenerator {
         return tables;
     }
 
+    /**
+     * Discovers all foreign key constraints in the public schema.
+     *
+     * @return map of child_table → (fk_column → parent_table)
+     */
+    Map<String, Map<String, String>> discoverFkConstraints(Connection conn) throws SQLException {
+        Map<String, Map<String, String>> result = new HashMap<>();
+        String sql = """
+                SELECT
+                    kcu.table_name  AS child_table,
+                    kcu.column_name AS fk_column,
+                    ccu.table_name  AS parent_table
+                FROM information_schema.table_constraints tc
+                JOIN information_schema.key_column_usage kcu
+                    ON tc.constraint_name = kcu.constraint_name
+                   AND tc.table_schema    = kcu.table_schema
+                JOIN information_schema.referential_constraints rc
+                    ON tc.constraint_name    = rc.constraint_name
+                   AND tc.constraint_schema  = rc.constraint_schema
+                JOIN information_schema.constraint_column_usage ccu
+                    ON rc.unique_constraint_name    = ccu.constraint_name
+                   AND rc.unique_constraint_schema  = ccu.table_schema
+                WHERE tc.constraint_type = 'FOREIGN KEY'
+                  AND tc.table_schema    = 'public'
+                """;
+        try (PreparedStatement ps = conn.prepareStatement(sql);
+             ResultSet rs = ps.executeQuery()) {
+            while (rs.next()) {
+                String child  = rs.getString("child_table");
+                String col    = rs.getString("fk_column");
+                String parent = rs.getString("parent_table");
+                result.computeIfAbsent(child, k -> new HashMap<>()).put(col, parent);
+            }
+        }
+        return result;
+    }
+
+    /**
+     * Sorts {@code tables} in topological order so that each table appears after all
+     * tables it depends on via foreign keys. Uses an iterative algorithm that repeatedly
+     * selects tables whose parents are already placed. If a cycle is detected (no
+     * progress possible), the remaining tables are appended as-is.
+     */
+    List<String> topologicalSort(List<String> tables,
+                                  Map<String, Map<String, String>> fkMap) {
+        List<String> sorted    = new ArrayList<>();
+        Set<String>  remaining = new LinkedHashSet<>(tables);
+
+        while (!remaining.isEmpty()) {
+            boolean progress = false;
+            Iterator<String> it = remaining.iterator();
+            while (it.hasNext()) {
+                String table   = it.next();
+                Set<String> parents = new HashSet<>(
+                        fkMap.getOrDefault(table, Collections.emptyMap()).values());
+                parents.retainAll(remaining); // only unsorted parents block this table
+                if (parents.isEmpty()) {
+                    sorted.add(table);
+                    it.remove();
+                    progress = true;
+                }
+            }
+            if (!progress) {
+                // Circular FK dependency — append remaining to avoid infinite loop
+                sorted.addAll(remaining);
+                break;
+            }
+        }
+        return sorted;
+    }
+
     private List<ColumnMeta> describeTable(Connection conn, String table) throws SQLException {
         List<ColumnMeta> cols = new ArrayList<>();
         String sql = """
@@ -292,17 +389,13 @@ public class SyntheticDataGenerator {
      * Seeds the mirror database with real sanitized rows from the load profile,
      * then fills the remaining volume with synthetic rows.
      *
-     * <p>For each row in {@code sanitizedRealData}, the target table is detected by
-     * matching its column names against the discovered schema. Missing columns are
-     * completed with synthetic values. UII columns are always replaced with pseudonyms —
-     * real identifiers are never inserted.</p>
-     *
-     * <p>If the profile contains no sanitized data, the method returns without error
-     * and the synthetic population covers 100 %.</p>
+     * <p>FK columns are resolved against the already-populated parent table so that
+     * referential integrity is maintained without exposing real production identifiers.</p>
      */
     void insertRealSanitizedData(Connection conn, LoadProfile profile,
                                   List<String> tables,
-                                  Map<String, double[]> dpStats) throws SQLException {
+                                  Map<String, double[]> dpStats,
+                                  Map<String, Map<String, String>> fkConstraints) throws SQLException {
         if (profile == null || profile.getQueries() == null) return;
 
         Map<String, List<ColumnMeta>> tableSchema = new HashMap<>();
@@ -317,9 +410,10 @@ public class SyntheticDataGenerator {
                 if (row == null || row.isEmpty()) continue;
                 String target = findBestMatchingTable(row.keySet(), tableSchema);
                 if (target == null) continue;
+                Map<String, String> fkCols = fkConstraints.getOrDefault(target, Collections.emptyMap());
                 Savepoint sp = conn.setSavepoint();
                 try {
-                    insertRealRow(conn, target, row, tableSchema.get(target), dpStats);
+                    insertRealRow(conn, target, row, tableSchema.get(target), dpStats, fkCols);
                     totalInserted++;
                 } catch (SQLException e) {
                     LOG.warning("[SyntheticData] Real row discarded: " + e.getMessage());
@@ -348,7 +442,8 @@ public class SyntheticDataGenerator {
 
     private void insertRealRow(Connection conn, String table, Map<String, Object> row,
                                 List<ColumnMeta> tableCols,
-                                Map<String, double[]> dpStats) throws SQLException {
+                                Map<String, double[]> dpStats,
+                                Map<String, String> fkColumns) throws SQLException {
         List<ColumnMeta> insertable = tableCols.stream()
                 .filter(c -> c.defaultValue == null || c.defaultValue.isEmpty())
                 .toList();
@@ -364,11 +459,13 @@ public class SyntheticDataGenerator {
                 ColumnMeta col = insertable.get(i);
                 ColumnCategory cat = classifyColumn(table, col.name);
                 if (cat == ColumnCategory.IDENTIFIER) {
-                    ps.setInt(i + 1, generateUiiPseudonym());
+                    String parentTable = fkColumns.get(col.name);
+                    Integer existingId = parentTable != null ? pickExistingPk(conn, parentTable) : null;
+                    ps.setInt(i + 1, existingId != null ? existingId : generateUiiPseudonym());
                 } else if (row.containsKey(col.name)) {
                     ps.setObject(i + 1, row.get(col.name));
                 } else {
-                    setColumnValue(ps, i + 1, col, dpStats);
+                    setColumnValue(ps, i + 1, col, dpStats, conn, fkColumns);
                 }
             }
             ps.executeUpdate();
@@ -377,7 +474,8 @@ public class SyntheticDataGenerator {
 
     private void insertRows(Connection conn, String table,
                              List<ColumnMeta> cols, int rows,
-                             Map<String, double[]> dpStats) throws SQLException {
+                             Map<String, double[]> dpStats,
+                             Map<String, String> fkColumns) throws SQLException {
         List<ColumnMeta> insertable = cols.stream()
                 .filter(c -> c.defaultValue == null || c.defaultValue.isEmpty())
                 .toList();
@@ -391,7 +489,7 @@ public class SyntheticDataGenerator {
         try (PreparedStatement ps = conn.prepareStatement(sql)) {
             for (int i = 0; i < rows; i++) {
                 for (int j = 0; j < insertable.size(); j++) {
-                    setColumnValue(ps, j + 1, insertable.get(j), dpStats);
+                    setColumnValue(ps, j + 1, insertable.get(j), dpStats, conn, fkColumns);
                 }
                 ps.addBatch();
                 if ((i + 1) % batchSize == 0) ps.executeBatch();
@@ -401,10 +499,17 @@ public class SyntheticDataGenerator {
     }
 
     private void setColumnValue(PreparedStatement ps, int idx, ColumnMeta col,
-                                 Map<String, double[]> dpStats) throws SQLException {
+                                 Map<String, double[]> dpStats,
+                                 Connection conn, Map<String, String> fkColumns) throws SQLException {
         ColumnCategory category = classifyColumn("", col.name);
         if (category == ColumnCategory.IDENTIFIER) {
-            ps.setInt(idx, generateUiiPseudonym());
+            String parentTable = fkColumns != null ? fkColumns.get(col.name) : null;
+            if (parentTable != null) {
+                Integer existingId = pickExistingPk(conn, parentTable);
+                ps.setInt(idx, existingId != null ? existingId : generateUiiPseudonym());
+            } else {
+                ps.setInt(idx, generateUiiPseudonym());
+            }
             return;
         }
         double[] stats = dpStats.get(col.name);
@@ -425,6 +530,28 @@ public class SyntheticDataGenerator {
                     ps.setString(idx, randomString(6, 20));
             default -> ps.setString(idx, randomString(4, 10));
         }
+    }
+
+    /**
+     * Returns a random primary key value from {@code tableName}, caching up to 500
+     * IDs per table to avoid repeated queries. Returns {@code null} if the table is empty.
+     *
+     * <p>The cache is keyed by table name and populated lazily on first access.
+     * Because tables are processed in topological order, the parent table is always
+     * fully populated before any of its children query this cache.</p>
+     */
+    private Integer pickExistingPk(Connection conn, String tableName) throws SQLException {
+        if (!pkCache.containsKey(tableName)) {
+            List<Integer> ids = new ArrayList<>();
+            try (PreparedStatement ps = conn.prepareStatement(
+                    "SELECT id FROM " + tableName + " ORDER BY random() LIMIT 500");
+                 ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) ids.add(rs.getInt(1));
+            }
+            pkCache.put(tableName, ids);
+        }
+        List<Integer> ids = pkCache.get(tableName);
+        return ids.isEmpty() ? null : ids.get(rng.nextInt(ids.size()));
     }
 
     private double defaultMeanFor(String dataType) {
