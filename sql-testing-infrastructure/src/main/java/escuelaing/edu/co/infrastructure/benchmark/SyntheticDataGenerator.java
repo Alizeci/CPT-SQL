@@ -253,6 +253,8 @@ public class SyntheticDataGenerator {
         Map<String, Map<String, String>> fkConstraints = discoverFkConstraints(conn);
         List<String> sortedTables = topologicalSort(tables, fkConstraints);
 
+        truncateTables(conn, sortedTables);
+
         Map<String, double[]> dpStats = buildDpStats(profile);
         Map<String, List<String>> columnStringPool = buildColumnStringPool(profile);
 
@@ -282,6 +284,23 @@ public class SyntheticDataGenerator {
     }
 
     // Schema discovery
+
+    /**
+     * Truncates all user tables before each population run, ensuring the benchmark
+     * is deterministic across profiles. Tables are listed comma-separated in a single
+     * TRUNCATE so PostgreSQL resolves FK ordering automatically via CASCADE.
+     * RESTART IDENTITY resets sequences to 1 so generated IDs are byte-identical
+     * across runs with the same seed.
+     */
+    private void truncateTables(Connection conn, List<String> tables) throws SQLException {
+        if (tables.isEmpty()) return;
+        String tableList = tables.stream()
+                .collect(Collectors.joining(", "));
+        try (java.sql.Statement st = conn.createStatement()) {
+            st.execute("TRUNCATE TABLE " + tableList + " RESTART IDENTITY CASCADE");
+        }
+        LOG.info("[SyntheticData] Tables truncated: " + tables);
+    }
 
     List<String> discoverUserTables(Connection conn) throws SQLException {
         List<String> tables = new ArrayList<>();
