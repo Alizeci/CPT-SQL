@@ -256,13 +256,22 @@ public class SyntheticDataGenerator {
         Map<String, double[]> dpStats = buildDpStats(profile);
         Map<String, List<String>> columnStringPool = buildColumnStringPool(profile);
 
-        insertRealSanitizedData(conn, profile, sortedTables, dpStats, fkConstraints, columnStringPool);
+        // Discover CHECK constraints to fill any gaps left by the production string pool.
+        // Enum-like columns (e.g. status, tier) whose values never appear in query SELECT
+        // results are covered here using the schema's own constraint metadata.
+        Map<String, double[]> checkNumericBounds = new HashMap<>();
+        Map<String, List<String>> checkEnumValues = discoverCheckConstraints(conn, checkNumericBounds);
+
+        // Merge: production-observed values take precedence; CHECK values fill the gaps.
+        checkEnumValues.forEach(columnStringPool::putIfAbsent);
+
+        insertRealSanitizedData(conn, profile, sortedTables, dpStats, fkConstraints, columnStringPool, checkNumericBounds);
 
         for (String table : sortedTables) {
             List<ColumnMeta> cols = describeTable(conn, table);
             if (cols.isEmpty()) continue;
             Map<String, String> fkCols = fkConstraints.getOrDefault(table, Collections.emptyMap());
-            insertRows(conn, table, cols, rowsPerTable, dpStats, fkCols, columnStringPool);
+            insertRows(conn, table, cols, rowsPerTable, dpStats, fkCols, columnStringPool, checkNumericBounds);
         }
 
         conn.commit();
@@ -289,6 +298,96 @@ public class SyntheticDataGenerator {
         }
         LOG.info("[SyntheticData] Tables discovered: " + tables);
         return tables;
+    }
+
+    /**
+     * Discovers simple CHECK constraints in the public schema and extracts the allowed
+     * values or numeric bounds they impose on individual columns.
+     *
+     * <p>Two patterns are recognised from the text returned by
+     * {@code pg_get_constraintdef()}:</p>
+     * <ul>
+     *   <li><b>IN / ANY</b> — {@code CHECK (col IN ('A','B'))} or the internal
+     *       {@code = ANY (ARRAY[...])} form produced by PostgreSQL. The quoted string
+     *       literals are extracted and stored as the allowed value list for that column.
+     *       Used in {@link #setColumnValue} to sample realistic enum values instead of
+     *       random alphanumeric strings.</li>
+     *   <li><b>BETWEEN / range</b> — {@code CHECK (col BETWEEN 0 AND 5)} or the
+     *       expanded {@code col >= 0 AND col <= 5} form. The lower and upper bounds are
+     *       stored as a two-element array and used to override the DP-calibrated clamp
+     *       in {@link #setColumnValue} for numeric columns.</li>
+     * </ul>
+     *
+     * <p>Constraints that do not match either pattern are silently ignored — the
+     * generator falls back to its default behaviour for those columns.</p>
+     *
+     * @param conn open connection to the mirror database
+     * @return map of column_name → allowed string values (for IN constraints) or
+     *         empty list with bounds stored separately in {@code checkNumericBounds}
+     */
+    Map<String, List<String>> discoverCheckConstraints(
+            Connection conn,
+            Map<String, double[]> checkNumericBounds) throws SQLException {
+
+        Map<String, List<String>> enumValues = new HashMap<>();
+
+        String sql = """
+                SELECT pg_get_constraintdef(oid) AS def
+                FROM pg_constraint
+                WHERE contype = 'c'
+                  AND connamespace = 'public'::regnamespace
+                """;
+
+        java.util.regex.Pattern inPattern = java.util.regex.Pattern.compile(
+                "(?i)'([^']+)'");
+        java.util.regex.Pattern rangePattern = java.util.regex.Pattern.compile(
+                "(?i)(\\w+)\\s*(?:BETWEEN\\s*(\\d+(?:\\.\\d+)?)\\s*AND\\s*(\\d+(?:\\.\\d+)?)" +
+                "|>=\\s*(\\d+(?:\\.\\d+)?).*?<=\\s*(\\d+(?:\\.\\d+)?))");
+
+        try (PreparedStatement ps = conn.prepareStatement(sql);
+             ResultSet rs = ps.executeQuery()) {
+            while (rs.next()) {
+                String def = rs.getString("def");
+                if (def == null) continue;
+
+                // IN / ANY pattern — extract quoted string literals
+                if (def.toUpperCase().contains(" IN ") || def.contains("= ANY")) {
+                    java.util.regex.Matcher m = inPattern.matcher(def);
+                    List<String> values = new ArrayList<>();
+                    while (m.find()) values.add(m.group(1));
+                    if (!values.isEmpty()) {
+                        // Column name is the first identifier before IN or = ANY
+                        java.util.regex.Matcher colM = java.util.regex.Pattern
+                                .compile("(?i)\\(?(\\w+)\\)?\\s*(?:=\\s*ANY|IN\\s*\\()")
+                                .matcher(def);
+                        if (colM.find()) {
+                            enumValues.put(colM.group(1).toLowerCase(), values);
+                        }
+                    }
+                }
+
+                // BETWEEN / >= … <= pattern — extract numeric bounds
+                java.util.regex.Matcher rm = rangePattern.matcher(def);
+                if (rm.find()) {
+                    String col = rm.group(1).toLowerCase();
+                    try {
+                        double lo = Double.parseDouble(
+                                rm.group(2) != null ? rm.group(2) : rm.group(4));
+                        double hi = Double.parseDouble(
+                                rm.group(3) != null ? rm.group(3) : rm.group(5));
+                        checkNumericBounds.put(col, new double[]{lo, hi});
+                    } catch (NumberFormatException ignored) {}
+                }
+            }
+        }
+
+        if (!enumValues.isEmpty()) {
+            LOG.info("[SyntheticData] CHECK enum columns discovered: " + enumValues.keySet());
+        }
+        if (!checkNumericBounds.isEmpty()) {
+            LOG.info("[SyntheticData] CHECK numeric bounds discovered: " + checkNumericBounds.keySet());
+        }
+        return enumValues;
     }
 
     /**
@@ -398,7 +497,8 @@ public class SyntheticDataGenerator {
                                   List<String> tables,
                                   Map<String, double[]> dpStats,
                                   Map<String, Map<String, String>> fkConstraints,
-                                  Map<String, List<String>> columnStringPool) throws SQLException {
+                                  Map<String, List<String>> columnStringPool,
+                                  Map<String, double[]> checkNumericBounds) throws SQLException {
         if (profile == null || profile.getQueries() == null) return;
 
         Map<String, List<ColumnMeta>> tableSchema = new HashMap<>();
@@ -416,7 +516,7 @@ public class SyntheticDataGenerator {
                 Map<String, String> fkCols = fkConstraints.getOrDefault(target, Collections.emptyMap());
                 Savepoint sp = conn.setSavepoint();
                 try {
-                    insertRealRow(conn, target, row, tableSchema.get(target), dpStats, fkCols, columnStringPool);
+                    insertRealRow(conn, target, row, tableSchema.get(target), dpStats, fkCols, columnStringPool, checkNumericBounds);
                     conn.releaseSavepoint(sp);
                     totalInserted++;
                 } catch (SQLException e) {
@@ -448,7 +548,8 @@ public class SyntheticDataGenerator {
                                 List<ColumnMeta> tableCols,
                                 Map<String, double[]> dpStats,
                                 Map<String, String> fkColumns,
-                                Map<String, List<String>> columnStringPool) throws SQLException {
+                                Map<String, List<String>> columnStringPool,
+                                Map<String, double[]> checkNumericBounds) throws SQLException {
         List<ColumnMeta> insertable = tableCols.stream()
                 .filter(c -> c.defaultValue == null || c.defaultValue.isEmpty())
                 .toList();
@@ -470,7 +571,7 @@ public class SyntheticDataGenerator {
                 } else if (row.containsKey(col.name)) {
                     ps.setObject(i + 1, row.get(col.name));
                 } else {
-                    setColumnValue(ps, i + 1, col, dpStats, conn, fkColumns, columnStringPool);
+                    setColumnValue(ps, i + 1, col, dpStats, conn, fkColumns, columnStringPool, checkNumericBounds);
                 }
             }
             ps.executeUpdate();
@@ -490,7 +591,8 @@ public class SyntheticDataGenerator {
                              List<ColumnMeta> cols, int rows,
                              Map<String, double[]> dpStats,
                              Map<String, String> fkColumns,
-                             Map<String, List<String>> columnStringPool) throws SQLException {
+                             Map<String, List<String>> columnStringPool,
+                             Map<String, double[]> checkNumericBounds) throws SQLException {
         List<ColumnMeta> insertable = cols.stream()
                 .filter(c -> c.defaultValue == null || c.defaultValue.isEmpty())
                 .toList();
@@ -506,7 +608,8 @@ public class SyntheticDataGenerator {
         try (PreparedStatement ps = conn.prepareStatement(sql)) {
             for (int i = 0; i < rows; i++) {
                 for (int j = 0; j < insertable.size(); j++) {
-                    setColumnValue(ps, j + 1, insertable.get(j), dpStats, conn, fkColumns, columnStringPool);
+                    setColumnValue(ps, j + 1, insertable.get(j), dpStats, conn, fkColumns,
+                            columnStringPool, checkNumericBounds);
                 }
                 Savepoint sp = conn.setSavepoint();
                 try {
@@ -545,7 +648,8 @@ public class SyntheticDataGenerator {
     private void setColumnValue(PreparedStatement ps, int idx, ColumnMeta col,
                                  Map<String, double[]> dpStats,
                                  Connection conn, Map<String, String> fkColumns,
-                                 Map<String, List<String>> columnStringPool) throws SQLException {
+                                 Map<String, List<String>> columnStringPool,
+                                 Map<String, double[]> checkNumericBounds) throws SQLException {
         ColumnCategory category = classifyColumn("", col.name);
         if (category == ColumnCategory.IDENTIFIER) {
             String parentTable = fkColumns != null ? fkColumns.get(col.name) : null;
@@ -560,10 +664,13 @@ public class SyntheticDataGenerator {
         double[] stats  = dpStats.get(col.name);
         double mean     = stats != null ? stats[0] : defaultMeanFor(col.dataType);
         double sigma    = stats != null ? stats[1] : defaultSigmaFor(col.dataType);
-        // Use the observed production min/max as clamp bounds so numeric values
-        // stay within any CHECK range constraints without requiring schema knowledge.
-        double minVal   = stats != null && stats.length > 2 ? stats[2] : 0.01;
-        double maxVal   = stats != null && stats.length > 3 ? stats[3] : 999_999.99;
+        // CHECK constraint bounds take precedence over production-observed min/max:
+        // they are the hard schema limits, while the DP-observed range is a soft guide.
+        double[] schemaBounds = checkNumericBounds.get(col.name.toLowerCase());
+        double minVal = schemaBounds != null ? schemaBounds[0]
+                : (stats != null && stats.length > 2 ? stats[2] : 0.01);
+        double maxVal = schemaBounds != null ? schemaBounds[1]
+                : (stats != null && stats.length > 3 ? stats[3] : 999_999.99);
         switch (col.dataType.toLowerCase()) {
             case "integer", "int", "int4", "int8", "bigint", "smallint" ->
                     ps.setInt(idx, (int) clamp(gaussianNoise(mean, sigma), 1, 10_000));
