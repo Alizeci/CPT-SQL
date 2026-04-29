@@ -7,43 +7,27 @@ import java.time.Instant;
 import java.util.Map;
 
 /**
- * Registro de una ejecución de consulta SQL capturada en producción.
- * Es el átomo de información que genera el wrapper JDBC (Fase 2)
- * y el insumo principal para construir el LoadProfile (Fase 3).
+ * Single SQL execution captured by the JDBC wrapper (Phase 2).
+ * The atomic unit used to build the {@link LoadProfile}.
  */
 @Data
 @Builder
 public class TransactionRecord {
 
-    /** Identificador declarado en {@code @SqlQuery#queryId} — puente con Fase 1. */
     private String queryId;
-
-    /** Texto SQL real ejecutado (con parámetros ya sustituidos si aplica). */
     private String sql;
-
-    /** Latencia de ejecución medida por el wrapper JDBC, en milisegundos. */
     private long latencyMs;
-
-    /** Momento exacto en que se inició la ejecución. */
     private Instant timestamp;
 
-    /**
-     * Plan de ejecución capturado con EXPLAIN ANALYZE, o {@code null}
-     * cuando no se solicitó captura de plan para esta muestra.
-     */
+    /** EXPLAIN ANALYZE output, or {@code null} when plan capture was not requested. */
     private String executionPlan;
 
-    /**
-     * Filas afectadas por la operación (INSERT/UPDATE/DELETE).
-     * {@code 0} para SELECT o cuando no se pudo determinar.
-     */
+    /** Rows affected by INSERT/UPDATE/DELETE; {@code 0} for SELECT. */
     private long rowCount;
 
     /**
-     * Subconjunto de columnas de la fila retornada que superaron el filtro
-     * de sanitización (solo Feature columns de la lista blanca).
-     * Nunca contiene PII — cumple Ley 1581/2012.
-     * {@code null} cuando no se capturaron datos de fila (p.ej. INSERT/UPDATE).
+     * Sanitized row data (Feature columns only, no PII).
+     * {@code null} for write operations.
      */
     private Map<String, Object> sanitizedData;
 }
