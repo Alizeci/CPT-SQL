@@ -7,96 +7,94 @@ import java.time.Instant;
 import java.util.List;
 
 /**
- * Informe de degradación generado por el {@code DegradationDetector} (Fase 3).
+ * Degradation report produced by {@code DegradationDetector} (Phase 3).
  *
- * <p>Detalla qué consultas fallaron, por qué tipo de degradación y cuáles
- * fueron los valores observados versus los umbrales de referencia.</p>
+ * <p>Details which queries failed, the type of degradation detected, and the
+ * observed values versus the reference thresholds.</p>
  *
- * <p>Es el artefacto de decisión que el pipeline CI/CD usa para bloquear
- * o aprobar un merge.</p>
+ * <p>This is the decision artifact the CI/CD pipeline uses to block or approve
+ * a merge.</p>
  */
 @Data
 @Builder
 public class DegradationReport {
 
-    /** Momento en que se generó el informe. */
+    /** Timestamp at which the report was generated. */
     private Instant generatedAt;
 
-    /** Nombre del perfil de carga que originó este informe. */
+    /** Name of the load profile that produced this report. */
     private String profileName;
 
-    /** SHA del commit evaluado. */
+    /** SHA of the evaluated commit. */
     private String commitSha;
 
-    /** {@code true} si existe al menos una degradación que bloquea el merge. */
+    /** {@code true} if at least one degradation blocks the merge. */
     private boolean hasDegradations;
 
-    /** Lista de degradaciones detectadas (vacía cuando {@code hasDegradations == false}). */
+    /** List of detected degradations (empty when {@code hasDegradations == false}). */
     private List<Degradation> degradations;
 
     // -------------------------------------------------------------------------
 
-    /** Tipo de degradación detectada. */
+    /** Type of detected degradation. */
     public enum DegradationType {
 
-        /** El p95 medido supera el {@code maxResponseTimeMs} declarado en {@code @Req}. */
+        /** Measured p95 exceeds the {@code maxResponseTimeMs} declared in {@code @Req}. */
         P95_EXCEEDED,
 
         /**
-         * El plan de ejecución cambió y la consulta tiene {@code allowPlanChange = false}
-         * en {@code @Req}.
+         * The execution plan changed and the query has {@code allowPlanChange = false}
+         * in {@code @Req}.
          */
         PLAN_CHANGED,
 
         /**
-         * El p95 medido supera el p95 de la línea base en más de un margen de tolerancia
-         * (10 % por defecto).
+         * Measured p95 exceeds the baseline p95 by more than the tolerance margin
+         * (10 % by default).
          */
         BASELINE_EXCEEDED,
 
         /**
-         * El p95 medido supera el umbral interno de proximidad al SLA (80 % por defecto).
-         * Indica que la consulta está operando en zona de riesgo: una variación normal
-         * del entorno podría cruzar el SLA en la próxima ejecución.
-         * Bloquea el merge aunque el SLA aún no haya sido formalmente violado.
+         * Measured p95 exceeds the internal SLA proximity threshold (80 % by default).
+         * The query is in the risk zone: a normal environment fluctuation could cross
+         * the SLA in the next run. Blocks the merge even though the SLA has not yet
+         * been formally violated.
          */
         SLO_PROXIMITY
     }
 
-    /**
-     * Detalle de una degradación individual.
-     */
+    /** Detail of a single detected degradation. */
     @Data
     @Builder
     public static class Degradation {
 
-        /** Consulta que presentó la degradación. */
+        /** Query that exhibited the degradation. */
         private String queryId;
 
-        /** Tipo de degradación. */
+        /** Type of degradation. */
         private DegradationType type;
 
         /**
-         * Valor observado en el benchmark.
+         * Value observed during the benchmark.
          * <ul>
-         *   <li>{@link DegradationType#P95_EXCEEDED} → p95 medido en ms</li>
-         *   <li>{@link DegradationType#PLAN_CHANGED} → costo del nuevo plan</li>
-         *   <li>{@link DegradationType#BASELINE_EXCEEDED} → p95 medido en ms</li>
+         *   <li>{@link DegradationType#P95_EXCEEDED} → measured p95 in ms</li>
+         *   <li>{@link DegradationType#PLAN_CHANGED} → cost of the new plan</li>
+         *   <li>{@link DegradationType#BASELINE_EXCEEDED} → measured p95 in ms</li>
          * </ul>
          */
         private double observedValue;
 
         /**
-         * Umbral que se superó.
+         * Threshold that was exceeded.
          * <ul>
-         *   <li>{@link DegradationType#P95_EXCEEDED} → {@code maxResponseTimeMs} de {@code @Req}</li>
-         *   <li>{@link DegradationType#PLAN_CHANGED} → costo del plan de la línea base</li>
-         *   <li>{@link DegradationType#BASELINE_EXCEEDED} → p95 de la línea base × 1.10</li>
+         *   <li>{@link DegradationType#P95_EXCEEDED} → {@code maxResponseTimeMs} from {@code @Req}</li>
+         *   <li>{@link DegradationType#PLAN_CHANGED} → baseline plan cost</li>
+         *   <li>{@link DegradationType#BASELINE_EXCEEDED} → baseline p95 × 1.10</li>
          * </ul>
          */
         private double thresholdValue;
 
-        /** Mensaje legible para el desarrollador. */
+        /** Human-readable message for the developer. */
         private String description;
     }
 }

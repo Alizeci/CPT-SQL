@@ -8,11 +8,6 @@ import escuelaing.edu.co.domain.model.LoadProfile;
 import escuelaing.edu.co.domain.model.QueryEntry;
 import escuelaing.edu.co.domain.model.TestProfile;
 import escuelaing.edu.co.domain.model.TransactionRecord;
-import escuelaing.edu.co.domain.model.validation.CardinalityFidelity;
-import escuelaing.edu.co.domain.model.validation.FidelitySummary;
-import escuelaing.edu.co.domain.model.validation.LatencyFidelity;
-import escuelaing.edu.co.domain.model.validation.ReproducibilityCheck;
-import escuelaing.edu.co.domain.model.validation.SyntheticDataInfo;
 import escuelaing.edu.co.domain.model.validation.ValidationFailedException;
 import escuelaing.edu.co.domain.model.validation.ValidationReport;
 import escuelaing.edu.co.infrastructure.analysis.QueryRegistryLoader;
@@ -23,8 +18,6 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.sql.Connection;
-import java.sql.PreparedStatement;
-import java.sql.Savepoint;
 import java.sql.SQLException;
 import java.time.Instant;
 import java.time.ZoneOffset;
@@ -64,8 +57,10 @@ public class BenchmarkRunner {
 
     private static final Logger LOG = Logger.getLogger(BenchmarkRunner.class.getName());
 
-    /** Number of executions per query during latency fidelity validation. */
-    private static final int VALIDATION_RUNS = 5;
+    private static final ObjectMapper MAPPER = new ObjectMapper()
+            .registerModule(new JavaTimeModule())
+            .disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS)
+            .enable(SerializationFeature.INDENT_OUTPUT);
 
     @Value("${loadtest.benchmark.profileName:nightly}")
     private String profileName;
@@ -90,15 +85,18 @@ public class BenchmarkRunner {
     private final SyntheticDataGenerator    dataGenerator;
     private final QueryExecutor             queryExecutor;
     private final QueryRegistryLoader       queryRegistry;
+    private final FidelityValidator         fidelityValidator;
 
     public BenchmarkRunner(MirrorDatabaseProvisioner provisioner,
                            SyntheticDataGenerator dataGenerator,
                            QueryExecutor queryExecutor,
-                           QueryRegistryLoader queryRegistry) {
-        this.provisioner   = provisioner;
-        this.dataGenerator = dataGenerator;
-        this.queryExecutor = queryExecutor;
-        this.queryRegistry = queryRegistry;
+                           QueryRegistryLoader queryRegistry,
+                           FidelityValidator fidelityValidator) {
+        this.provisioner      = provisioner;
+        this.dataGenerator    = dataGenerator;
+        this.queryExecutor    = queryExecutor;
+        this.queryRegistry    = queryRegistry;
+        this.fidelityValidator = fidelityValidator;
     }
 
     // -------------------------------------------------------------------------
@@ -139,7 +137,7 @@ public class BenchmarkRunner {
      */
     public BenchmarkResult runWithValidation(LoadProfile profile, String commitSha, boolean validate) {
         if (validate) {
-            ValidationReport report = performValidation(profile);
+            ValidationReport report = fidelityValidator.performValidation(profile);
             persistValidationReport(report);
             if (!report.isPass()) {
                 throw new ValidationFailedException(report);
@@ -389,176 +387,6 @@ public class BenchmarkRunner {
     }
 
     // -------------------------------------------------------------------------
-    // Fidelity validation
-    // -------------------------------------------------------------------------
-
-    /**
-     * Runs the three fidelity validation dimensions (latency, cardinality,
-     * reproducibility) and compiles a {@link ValidationReport}.
-     * Pass criterion: ≥ 90 % of queries must pass each dimension.
-     */
-    public ValidationReport performValidation(LoadProfile profile) {
-        LOG.info("[BenchmarkRunner] Starting fidelity validation...");
-        provisioner.provision();
-
-        try (Connection conn = provisioner.openConnection()) {
-            dataGenerator.populate(conn, profile);
-
-            Map<String, LatencyFidelity>     latency         = validateLatencyFidelity(conn, profile);
-            Map<String, CardinalityFidelity> cardinality     = validateCardinalityFidelity(conn, profile);
-            ReproducibilityCheck             reproducibility = validateReproducibility(conn, profile);
-
-            boolean latencyPass     = passRate(latency.values().stream()
-                    .map(LatencyFidelity::isPass).toList()) >= 0.90;
-            boolean cardinalityPass = cardinality.isEmpty() || passRate(cardinality.values().stream()
-                    .map(CardinalityFidelity::isPass).toList()) >= 0.90;
-            boolean allPass = latencyPass && cardinalityPass && reproducibility.isPass();
-
-            FidelitySummary latencySummary = FidelitySummary.builder()
-                    .queriesTested(latency.size())
-                    .queriesPassed((int) latency.values().stream().filter(LatencyFidelity::isPass).count())
-                    .meanErrorPct(latency.values().stream()
-                            .mapToDouble(LatencyFidelity::getErrorPct).average().orElse(0.0))
-                    .build();
-
-            FidelitySummary cardinalitySummary = FidelitySummary.builder()
-                    .queriesTested(cardinality.size())
-                    .queriesPassed((int) cardinality.values().stream().filter(CardinalityFidelity::isPass).count())
-                    .meanErrorPct(cardinality.values().stream()
-                            .mapToDouble(CardinalityFidelity::getErrorPct).average().orElse(0.0))
-                    .build();
-
-            SyntheticDataInfo syntheticInfo = SyntheticDataInfo.builder()
-                    .epsilonFt(SyntheticDataGenerator.EPSILON_FT)
-                    .epsilonUii(SyntheticDataGenerator.EPSILON_UII)
-                    .epsilonTotal(SyntheticDataGenerator.EPSILON_TOTAL)
-                    .delta(1e-6)
-                    .totalRowsGenerated(dataGenerator.getLastRowsGenerated())
-                    .schemaCoverage("100% (" + dataGenerator.getLastTablesPopulated() + " tables)")
-                    .build();
-
-            String notes = allPass
-                    ? "All dimensions pass threshold. Proceed with benchmark."
-                    : String.format("Validation FAIL — latency:%s cardinality:%s reproducibility:%s",
-                            latencyPass ? "PASS" : "FAIL",
-                            cardinalityPass ? "PASS" : "FAIL",
-                            reproducibility.isPass() ? "PASS" : "FAIL");
-
-            ValidationReport report = ValidationReport.builder()
-                    .validationStatus(allPass ? ValidationReport.Status.PASS : ValidationReport.Status.FAIL)
-                    .generatedAt(Instant.now())
-                    .seed(dataGenerator.getSeed())
-                    .syntheticDataGeneration(syntheticInfo)
-                    .latencySummary(latencySummary)
-                    .latencyFidelity(latency)
-                    .cardinalitySummary(cardinalitySummary)
-                    .cardinalityFidelity(cardinality)
-                    .reproducibility(reproducibility)
-                    .pass(allPass)
-                    .notes(notes)
-                    .build();
-
-            LOG.info("[BenchmarkRunner] Validation: " + report.getValidationStatus());
-            return report;
-
-        } catch (SQLException e) {
-            throw new RuntimeException("Fidelity validation failed", e);
-        }
-    }
-
-    /**
-     * Validates that p95 on synthetic data differs by less than
-     * {@link SyntheticDataGenerator#LATENCY_ERROR_THRESHOLD_PCT} from the
-     * production p95 recorded in the load profile.
-     */
-    public Map<String, LatencyFidelity> validateLatencyFidelity(Connection conn, LoadProfile profile) {
-        Map<String, LatencyFidelity> results = new HashMap<>();
-        for (Map.Entry<String, LoadProfile.QueryStats> entry : profile.getQueries().entrySet()) {
-            String qid = entry.getKey();
-            LoadProfile.QueryStats stats = entry.getValue();
-            if (stats.getCapturedSql() == null) continue;
-
-            List<Long> latencies = new ArrayList<>();
-            for (int i = 0; i < VALIDATION_RUNS; i++) {
-                latencies.add(queryExecutor.execute(conn, qid, stats, stats.getCapturedSql()).getLatencyMs());
-            }
-            Collections.sort(latencies);
-            long p95Syn  = (long) percentile(latencies, 95.0);
-            long p95Real = (long) stats.getP95Ms();
-
-            double errorPct = p95Real > 0 ? Math.abs(p95Syn - p95Real) * 100.0 / p95Real : 0.0;
-            boolean pass    = errorPct < SyntheticDataGenerator.LATENCY_ERROR_THRESHOLD_PCT;
-
-            results.put(qid, LatencyFidelity.builder()
-                    .queryId(qid).p95RealMs(p95Real).p95SyntheticMs(p95Syn)
-                    .errorPct(errorPct).pass(pass).build());
-
-            LOG.info(String.format("[Validation] Latency %s: p95_real=%d ms, p95_syn=%d ms, error=%.1f%% → %s",
-                    qid, p95Real, p95Syn, errorPct, pass ? "PASS" : "FAIL"));
-        }
-        return results;
-    }
-
-    /**
-     * Validates cardinality fidelity for write queries (INSERT/UPDATE/DELETE).
-     *
-     * <p>Compares rows affected in production ({@code avgRowCount} from the profile)
-     * with rows affected on the mirror database. SELECT queries ({@code avgRowCount == 0})
-     * are skipped — row count is unavailable without consuming the ResultSet.
-     * Each write is executed inside a savepoint and rolled back to preserve mirror state.</p>
-     */
-    public Map<String, CardinalityFidelity> validateCardinalityFidelity(Connection conn,
-                                                                          LoadProfile profile) {
-        Map<String, CardinalityFidelity> results = new HashMap<>();
-        for (Map.Entry<String, LoadProfile.QueryStats> entry : profile.getQueries().entrySet()) {
-            String qid = entry.getKey();
-            LoadProfile.QueryStats stats = entry.getValue();
-            if (stats.getCapturedSql() == null) continue;
-            if (stats.getAvgRowCount() == 0) continue;
-
-            double rowsReal      = stats.getAvgRowCount();
-            long   rowsSynthetic = countWriteAffectedRows(conn, stats.getCapturedSql());
-
-            double errorPct = rowsReal > 0
-                    ? Math.abs(rowsSynthetic - rowsReal) * 100.0 / rowsReal : 0.0;
-            boolean pass    = errorPct < SyntheticDataGenerator.CARDINALITY_ERROR_THRESHOLD_PCT;
-
-            results.put(qid, CardinalityFidelity.builder()
-                    .queryId(qid).rowsReal((long) rowsReal).rowsSynthetic(rowsSynthetic)
-                    .errorPct(errorPct).pass(pass).build());
-
-            LOG.info(String.format("[Validation] Cardinality %s: real=%.0f, syn=%d, error=%.1f%% → %s",
-                    qid, rowsReal, rowsSynthetic, errorPct, pass ? "PASS" : "FAIL"));
-        }
-        return results;
-    }
-
-    /**
-     * Verifies that generating data with the same seed produces byte-identical
-     * results across two consecutive runs (CRC32 over table contents).
-     */
-    public ReproducibilityCheck validateReproducibility(Connection conn,
-                                                         LoadProfile profile) throws SQLException {
-        long seed = dataGenerator.getSeed();
-
-        dataGenerator.setSeed(seed);
-        dataGenerator.populate(conn, profile);
-        long checksum1 = computeTablesChecksum(conn);
-
-        dataGenerator.setSeed(seed);
-        dataGenerator.populate(conn, profile);
-        long checksum2 = computeTablesChecksum(conn);
-
-        boolean identical = checksum1 == checksum2;
-        LOG.info(String.format("[Validation] Reproducibility: crc1=%d, crc2=%d → %s",
-                checksum1, checksum2, identical ? "PASS" : "FAIL"));
-
-        return ReproducibilityCheck.builder()
-                .seed(seed).checksum1(checksum1).checksum2(checksum2)
-                .byteIdentical(identical).pass(identical).build();
-    }
-
-    // -------------------------------------------------------------------------
     // Persistence
     // -------------------------------------------------------------------------
 
@@ -573,7 +401,7 @@ public class BenchmarkRunner {
             String timestamp = DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss")
                     .withZone(ZoneOffset.UTC).format(result.getExecutedAt());
             Path file = dir.resolve("benchmark-" + result.getProfileName() + "-" + timestamp + ".json");
-            objectMapper().writeValue(file.toFile(), result);
+            MAPPER.writeValue(file.toFile(), result);
             LOG.info("[BenchmarkRunner] BenchmarkResult saved to " + file.toAbsolutePath());
         } catch (IOException e) {
             LOG.warning("[BenchmarkRunner] Could not persist BenchmarkResult: " + e.getMessage());
@@ -585,69 +413,11 @@ public class BenchmarkRunner {
         try {
             Path dir = Path.of("build", "validation");
             Files.createDirectories(dir);
-            objectMapper().writeValue(dir.resolve("VALIDATION_REPORT.json").toFile(), report);
+            MAPPER.writeValue(dir.resolve("VALIDATION_REPORT.json").toFile(), report);
             LOG.info("[BenchmarkRunner] ValidationReport saved.");
         } catch (IOException e) {
             LOG.warning("[BenchmarkRunner] Could not persist ValidationReport: " + e.getMessage());
         }
-    }
-
-    private ObjectMapper objectMapper() {
-        return new ObjectMapper()
-                .registerModule(new JavaTimeModule())
-                .disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS)
-                .enable(SerializationFeature.INDENT_OUTPUT);
-    }
-
-    // -------------------------------------------------------------------------
-    // Validation helpers
-    // -------------------------------------------------------------------------
-
-    private double passRate(List<Boolean> results) {
-        if (results.isEmpty()) return 1.0;
-        return (double) results.stream().filter(Boolean::booleanValue).count() / results.size();
-    }
-
-    /**
-     * Executes a write statement inside a savepoint and rolls back immediately,
-     * returning the number of rows affected without mutating the mirror database.
-     */
-    private long countWriteAffectedRows(Connection conn, String sql) {
-        Savepoint sp = null;
-        boolean prevAutoCommit = true;
-        try {
-            prevAutoCommit = conn.getAutoCommit();
-            conn.setAutoCommit(false);
-            sp = conn.setSavepoint();
-            try (PreparedStatement ps = conn.prepareStatement(sql)) {
-                long count = ps.executeUpdate();
-                conn.rollback(sp);
-                return count;
-            } catch (SQLException e) {
-                LOG.warning("[Validation] Write cardinality check failed: " + e.getMessage());
-                return 0;
-            }
-        } catch (SQLException e) {
-            LOG.warning("[Validation] Connection error in countWriteAffectedRows: " + e.getMessage());
-            return 0;
-        } finally {
-            try { if (sp != null) conn.rollback(sp); } catch (SQLException ignored) {}
-            try { conn.setAutoCommit(prevAutoCommit); } catch (SQLException ignored) {}
-        }
-    }
-
-    /**
-     * Computes a combined CRC32 checksum over all user tables in the mirror database.
-     * Tables are discovered dynamically — no schema-specific names are assumed.
-     */
-    private long computeTablesChecksum(Connection conn) throws SQLException {
-        long combined = 0;
-        for (String table : dataGenerator.discoverUserTables(conn)) {
-            try {
-                combined ^= dataGenerator.computeChecksum(conn, table);
-            } catch (SQLException ignored) { /* table not accessible — skip */ }
-        }
-        return combined;
     }
 
     // -------------------------------------------------------------------------
