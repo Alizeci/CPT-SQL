@@ -9,6 +9,7 @@ import escuelaing.edu.co.domain.model.validation.ValidationReport;
 import escuelaing.edu.co.infrastructure.analysis.BaselineManager;
 import escuelaing.edu.co.infrastructure.analysis.DegradationDetector;
 import escuelaing.edu.co.infrastructure.benchmark.BenchmarkRunner;
+import escuelaing.edu.co.infrastructure.benchmark.FidelityValidator;
 import escuelaing.edu.co.infrastructure.capture.LoadProfileMerger;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.CommandLineRunner;
@@ -47,6 +48,7 @@ public class BenchmarkMain {
 
     @Bean
     CommandLineRunner run(BenchmarkRunner benchmarkRunner,
+                          FidelityValidator fidelityValidator,
                           DegradationDetector detector,
                           BaselineManager baselineManager,
                           @Value("${loadtest.profile.path:load-profile.json}") String profilePath,
@@ -85,7 +87,7 @@ public class BenchmarkMain {
 
             // --- Synthesis fidelity validation (SynQB) ---
             try {
-                ValidationReport validationReport = benchmarkRunner.performValidation(profile);
+                ValidationReport validationReport = fidelityValidator.performValidation(profile);
                 benchmarkRunner.persistValidationReport(validationReport);
                 System.out.println("[BenchmarkMain] VALIDATION_REPORT.json generated — "
                         + validationReport.getValidationStatus());
