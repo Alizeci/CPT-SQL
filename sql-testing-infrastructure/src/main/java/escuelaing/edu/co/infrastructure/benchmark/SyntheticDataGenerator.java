@@ -593,8 +593,14 @@ public class SyntheticDataGenerator {
                              Map<String, String> fkColumns,
                              Map<String, List<String>> columnStringPool,
                              Map<String, double[]> checkNumericBounds) throws SQLException {
+        // Columns with a DEFAULT are normally skipped (the DB applies the default).
+        // Exception: if the schema's CHECK constraints reveal valid values for a column,
+        // we override the default so synthetic data covers the full domain instead of
+        // being uniformly stuck at one value (e.g. all orders with status='PENDING').
         List<ColumnMeta> insertable = cols.stream()
-                .filter(c -> c.defaultValue == null || c.defaultValue.isEmpty())
+                .filter(c -> c.defaultValue == null || c.defaultValue.isEmpty()
+                        || columnStringPool.containsKey(c.name.toLowerCase())
+                        || checkNumericBounds.containsKey(c.name.toLowerCase()))
                 .toList();
         if (insertable.isEmpty()) return;
 
