@@ -737,10 +737,11 @@ public class SyntheticDataGenerator {
         if (!pkCache.containsKey(tableName)) {
             List<Integer> ids = new ArrayList<>();
             try (PreparedStatement ps = conn.prepareStatement(
-                    "SELECT id FROM " + quoteIdent(conn, tableName) + " ORDER BY random() LIMIT 500");
+                    "SELECT id FROM " + quoteIdent(conn, tableName) + " ORDER BY id LIMIT 500");
                  ResultSet rs = ps.executeQuery()) {
                 while (rs.next()) ids.add(rs.getInt(1));
             }
+            Collections.shuffle(ids, rng);
             pkCache.put(tableName, ids);
         }
         List<Integer> ids = pkCache.get(tableName);

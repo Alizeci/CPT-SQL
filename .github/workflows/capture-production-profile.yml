@@ -7,7 +7,7 @@ on:
         description: 'Simulation duration in seconds'
         required: false
         type: number
-        default: 120
+        default: 180
     secrets:
       DB_URL:
         required: true
