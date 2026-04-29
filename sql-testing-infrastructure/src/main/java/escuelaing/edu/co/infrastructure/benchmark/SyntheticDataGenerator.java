@@ -9,6 +9,7 @@ import java.math.BigDecimal;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
+import java.sql.ResultSetMetaData;
 import java.sql.SQLException;
 import java.sql.Savepoint;
 import java.util.ArrayList;
@@ -207,9 +208,14 @@ public class SyntheticDataGenerator {
         String sql = "SELECT * FROM " + quoteIdent(conn, tableName) + " ORDER BY 1";
         try (PreparedStatement ps = conn.prepareStatement(sql);
              ResultSet rs = ps.executeQuery()) {
-            int cols = rs.getMetaData().getColumnCount();
+            ResultSetMetaData meta = rs.getMetaData();
+            int cols = meta.getColumnCount();
             while (rs.next()) {
                 for (int i = 1; i <= cols; i++) {
+                    // Skip timestamp columns — DEFAULT NOW() differs between runs
+                    int sqlType = meta.getColumnType(i);
+                    if (sqlType == java.sql.Types.TIMESTAMP
+                            || sqlType == java.sql.Types.TIMESTAMP_WITH_TIMEZONE) continue;
                     Object v = rs.getObject(i);
                     if (v != null) crc.update(v.toString().getBytes());
                 }
