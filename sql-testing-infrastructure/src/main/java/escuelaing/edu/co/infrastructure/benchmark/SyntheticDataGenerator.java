@@ -226,12 +226,14 @@ public class SyntheticDataGenerator {
         insertRealSanitizedData(conn, profile, tables, dpStats);
 
         for (String table : tables) {
-            List<ColumnMeta> cols = describeTable(conn, table);
-            if (cols.isEmpty()) continue;
+            Savepoint sp = conn.setSavepoint();
             try {
+                List<ColumnMeta> cols = describeTable(conn, table);
+                if (cols.isEmpty()) continue;
                 insertRows(conn, table, cols, rowsPerTable, dpStats);
             } catch (SQLException e) {
                 LOG.warning("[SyntheticData] Could not populate '" + table + "': " + e.getMessage());
+                conn.rollback(sp);
             }
         }
 
