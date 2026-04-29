@@ -51,6 +51,9 @@ import java.util.zip.CRC32;
  * to sort tables topologically (parents before children) and to generate FK column
  * values that reference existing rows in the parent table.</p>
  *
+ * <p>Each row is inserted individually with its own savepoint so that a single
+ * constraint violation does not discard the entire batch for that table.</p>
+ *
  * <pre>
  * loadtest.synthetic.rowsPerTable=500
  * loadtest.synthetic.batchSize=200
@@ -87,9 +90,6 @@ public class SyntheticDataGenerator {
 
     @Value("${loadtest.synthetic.rowsPerTable:500}")
     private int rowsPerTable;
-
-    @Value("${loadtest.synthetic.batchSize:200}")
-    private int batchSize;
 
     @Value("${loadtest.synthetic.seed:42}")
     private long seed;
@@ -233,6 +233,12 @@ public class SyntheticDataGenerator {
      *       table instead of an arbitrary pseudonym that would violate the constraint.</li>
      * </ol>
      *
+     * <p>Each row is inserted individually with its own savepoint so that a single
+     * constraint violation does not discard the entire batch for that table.
+     * VARCHAR columns with low cardinality (enum-like CHECK constraints) are generated
+     * by sampling from values observed in production via {@code sanitizedRealData},
+     * preserving referential integrity without requiring schema-specific configuration.</p>
+     *
      * @param conn    open connection to the mirror database
      * @param profile Phase 2 load profile used to calibrate distributions
      */
@@ -248,19 +254,15 @@ public class SyntheticDataGenerator {
         List<String> sortedTables = topologicalSort(tables, fkConstraints);
 
         Map<String, double[]> dpStats = buildDpStats(profile);
-        insertRealSanitizedData(conn, profile, sortedTables, dpStats, fkConstraints);
+        Map<String, List<String>> columnStringPool = buildColumnStringPool(profile);
+
+        insertRealSanitizedData(conn, profile, sortedTables, dpStats, fkConstraints, columnStringPool);
 
         for (String table : sortedTables) {
-            Savepoint sp = conn.setSavepoint();
-            try {
-                List<ColumnMeta> cols = describeTable(conn, table);
-                if (cols.isEmpty()) continue;
-                Map<String, String> fkCols = fkConstraints.getOrDefault(table, Collections.emptyMap());
-                insertRows(conn, table, cols, rowsPerTable, dpStats, fkCols);
-            } catch (SQLException e) {
-                LOG.warning("[SyntheticData] Could not populate '" + table + "': " + e.getMessage());
-                conn.rollback(sp);
-            }
+            List<ColumnMeta> cols = describeTable(conn, table);
+            if (cols.isEmpty()) continue;
+            Map<String, String> fkCols = fkConstraints.getOrDefault(table, Collections.emptyMap());
+            insertRows(conn, table, cols, rowsPerTable, dpStats, fkCols, columnStringPool);
         }
 
         conn.commit();
@@ -395,7 +397,8 @@ public class SyntheticDataGenerator {
     void insertRealSanitizedData(Connection conn, LoadProfile profile,
                                   List<String> tables,
                                   Map<String, double[]> dpStats,
-                                  Map<String, Map<String, String>> fkConstraints) throws SQLException {
+                                  Map<String, Map<String, String>> fkConstraints,
+                                  Map<String, List<String>> columnStringPool) throws SQLException {
         if (profile == null || profile.getQueries() == null) return;
 
         Map<String, List<ColumnMeta>> tableSchema = new HashMap<>();
@@ -413,7 +416,8 @@ public class SyntheticDataGenerator {
                 Map<String, String> fkCols = fkConstraints.getOrDefault(target, Collections.emptyMap());
                 Savepoint sp = conn.setSavepoint();
                 try {
-                    insertRealRow(conn, target, row, tableSchema.get(target), dpStats, fkCols);
+                    insertRealRow(conn, target, row, tableSchema.get(target), dpStats, fkCols, columnStringPool);
+                    conn.releaseSavepoint(sp);
                     totalInserted++;
                 } catch (SQLException e) {
                     LOG.warning("[SyntheticData] Real row discarded: " + e.getMessage());
@@ -443,7 +447,8 @@ public class SyntheticDataGenerator {
     private void insertRealRow(Connection conn, String table, Map<String, Object> row,
                                 List<ColumnMeta> tableCols,
                                 Map<String, double[]> dpStats,
-                                Map<String, String> fkColumns) throws SQLException {
+                                Map<String, String> fkColumns,
+                                Map<String, List<String>> columnStringPool) throws SQLException {
         List<ColumnMeta> insertable = tableCols.stream()
                 .filter(c -> c.defaultValue == null || c.defaultValue.isEmpty())
                 .toList();
@@ -465,17 +470,27 @@ public class SyntheticDataGenerator {
                 } else if (row.containsKey(col.name)) {
                     ps.setObject(i + 1, row.get(col.name));
                 } else {
-                    setColumnValue(ps, i + 1, col, dpStats, conn, fkColumns);
+                    setColumnValue(ps, i + 1, col, dpStats, conn, fkColumns, columnStringPool);
                 }
             }
             ps.executeUpdate();
         }
     }
 
+    /**
+     * Inserts {@code rows} synthetic rows into {@code table}.
+     *
+     * <p>Each row is inserted individually with its own savepoint. This avoids the
+     * batch-level rollback problem where a single constraint violation (e.g. a numeric
+     * value outside a CHECK range, or a random string that fails an enum-like constraint)
+     * would discard every row in the batch, leaving the table empty. Per-row savepoints
+     * ensure that only the violating row is discarded while all valid rows survive.</p>
+     */
     private void insertRows(Connection conn, String table,
                              List<ColumnMeta> cols, int rows,
                              Map<String, double[]> dpStats,
-                             Map<String, String> fkColumns) throws SQLException {
+                             Map<String, String> fkColumns,
+                             Map<String, List<String>> columnStringPool) throws SQLException {
         List<ColumnMeta> insertable = cols.stream()
                 .filter(c -> c.defaultValue == null || c.defaultValue.isEmpty())
                 .toList();
@@ -486,21 +501,51 @@ public class SyntheticDataGenerator {
         String sql = "INSERT INTO " + table + " (" + colNames + ") VALUES (" + placeholders
                 + ") ON CONFLICT DO NOTHING";
 
+        int inserted = 0;
+        int skipped  = 0;
         try (PreparedStatement ps = conn.prepareStatement(sql)) {
             for (int i = 0; i < rows; i++) {
                 for (int j = 0; j < insertable.size(); j++) {
-                    setColumnValue(ps, j + 1, insertable.get(j), dpStats, conn, fkColumns);
+                    setColumnValue(ps, j + 1, insertable.get(j), dpStats, conn, fkColumns, columnStringPool);
                 }
-                ps.addBatch();
-                if ((i + 1) % batchSize == 0) ps.executeBatch();
+                Savepoint sp = conn.setSavepoint();
+                try {
+                    ps.executeUpdate();
+                    conn.releaseSavepoint(sp);
+                    inserted++;
+                } catch (SQLException e) {
+                    conn.rollback(sp);
+                    skipped++;
+                }
             }
-            ps.executeBatch();
+        }
+        if (skipped > 0) {
+            LOG.warning(String.format(
+                    "[SyntheticData] Table '%s': %d rows inserted, %d discarded (constraint violations).",
+                    table, inserted, skipped));
+        } else {
+            LOG.info(String.format("[SyntheticData] Table '%s': %d rows inserted.", table, inserted));
         }
     }
 
+    /**
+     * Sets the value for a single column in {@code ps} at position {@code idx}.
+     *
+     * <p>IDENTIFIER columns receive a pseudonym from the UII range or an existing FK id.
+     * FEATURE columns are generated as follows:</p>
+     * <ul>
+     *   <li>Numeric types: Gaussian noise around the DP-calibrated mean, clamped to the
+     *       observed production min/max so values stay within any range CHECK constraints.</li>
+     *   <li>String types: sampled from the per-column pool built from {@code sanitizedRealData}
+     *       when available (preserves enum-like values such as status codes); falls back to a
+     *       random alphanumeric string for columns absent from production samples.</li>
+     *   <li>Boolean/timestamp: uniform random.</li>
+     * </ul>
+     */
     private void setColumnValue(PreparedStatement ps, int idx, ColumnMeta col,
                                  Map<String, double[]> dpStats,
-                                 Connection conn, Map<String, String> fkColumns) throws SQLException {
+                                 Connection conn, Map<String, String> fkColumns,
+                                 Map<String, List<String>> columnStringPool) throws SQLException {
         ColumnCategory category = classifyColumn("", col.name);
         if (category == ColumnCategory.IDENTIFIER) {
             String parentTable = fkColumns != null ? fkColumns.get(col.name) : null;
@@ -512,22 +557,33 @@ public class SyntheticDataGenerator {
             }
             return;
         }
-        double[] stats = dpStats.get(col.name);
-        double mean  = stats != null ? stats[0] : defaultMeanFor(col.dataType);
-        double sigma = stats != null ? stats[1] : defaultSigmaFor(col.dataType);
+        double[] stats  = dpStats.get(col.name);
+        double mean     = stats != null ? stats[0] : defaultMeanFor(col.dataType);
+        double sigma    = stats != null ? stats[1] : defaultSigmaFor(col.dataType);
+        // Use the observed production min/max as clamp bounds so numeric values
+        // stay within any CHECK range constraints without requiring schema knowledge.
+        double minVal   = stats != null && stats.length > 2 ? stats[2] : 0.01;
+        double maxVal   = stats != null && stats.length > 3 ? stats[3] : 999_999.99;
         switch (col.dataType.toLowerCase()) {
             case "integer", "int", "int4", "int8", "bigint", "smallint" ->
                     ps.setInt(idx, (int) clamp(gaussianNoise(mean, sigma), 1, 10_000));
             case "numeric", "decimal", "real", "double precision", "float8" ->
                     ps.setBigDecimal(idx, BigDecimal.valueOf(
-                            Math.round(clamp(gaussianNoise(mean, sigma), 0.01, 999_999.99) * 100) / 100.0));
+                            Math.round(clamp(gaussianNoise(mean, sigma), minVal, maxVal) * 100) / 100.0));
             case "boolean", "bool" ->
                     ps.setBoolean(idx, rng.nextBoolean());
             case "timestamp", "timestamp without time zone", "timestamp with time zone" ->
                     ps.setTimestamp(idx, java.sql.Timestamp.from(java.time.Instant.now()
                             .minusSeconds(rng.nextInt(86_400 * 30))));
-            case "char", "character", "character varying", "varchar", "text" ->
-                    ps.setString(idx, randomString(6, 20));
+            case "char", "character", "character varying", "varchar", "text" -> {
+                // Sample from production-observed values for this column when available.
+                // Enum-like columns (status, tier, category) will thus receive valid values
+                // without any schema-specific configuration.
+                List<String> colPool = columnStringPool.getOrDefault(col.name, Collections.emptyList());
+                ps.setString(idx, colPool.isEmpty()
+                        ? randomString(6, 20)
+                        : colPool.get(rng.nextInt(colPool.size())));
+            }
             default -> ps.setString(idx, randomString(4, 10));
         }
     }
@@ -631,6 +687,48 @@ public class SyntheticDataGenerator {
         return Collections.unmodifiableList(pool);
     }
 
+    /**
+     * Builds a per-column pool of string values extracted from {@code sanitizedRealData}.
+     *
+     * <p>Used in {@link #setColumnValue} so that VARCHAR columns with low-cardinality
+     * values (enum-like CHECK constraints such as {@code status} or {@code tier}) are
+     * populated with values observed in production rather than random alphanumeric
+     * strings. The approach is entirely schema-agnostic: no column or table names are
+     * hardcoded — the pool is built dynamically from whatever columns appear in the
+     * captured profile.</p>
+     *
+     * <p>High-cardinality columns (likely free-text or PII, cardinality ratio above
+     * {@link #STRING_CARDINALITY_THRESHOLD}) are excluded using the same threshold as
+     * {@link #buildStringPool}.</p>
+     *
+     * @return map of column name → observed string values; empty map if profile is null
+     */
+    Map<String, List<String>> buildColumnStringPool(LoadProfile profile) {
+        if (profile == null || profile.getQueries() == null) return Collections.emptyMap();
+
+        Map<String, List<String>> pool = new HashMap<>();
+        for (LoadProfile.QueryStats stats : profile.getQueries().values()) {
+            if (stats.getSanitizedRealData() == null) continue;
+            for (Map<String, Object> row : stats.getSanitizedRealData()) {
+                if (row == null) continue;
+                for (Map.Entry<String, Object> entry : row.entrySet()) {
+                    if (entry.getValue() instanceof String s && !s.isBlank()) {
+                        pool.computeIfAbsent(entry.getKey(), k -> new ArrayList<>()).add(s);
+                    }
+                }
+            }
+        }
+
+        // Exclude high-cardinality columns (likely free-text or PII).
+        pool.entrySet().removeIf(e -> {
+            long unique = e.getValue().stream().distinct().count();
+            return (double) unique / e.getValue().size() > STRING_CARDINALITY_THRESHOLD;
+        });
+
+        LOG.info("[SyntheticData] Column string pool built for: " + pool.keySet());
+        return pool;
+    }
+
     private Set<String> parseSensitiveColumns() {
         if (sensitiveColumnsRaw == null || sensitiveColumnsRaw.isBlank()) return Collections.emptySet();
         return java.util.Arrays.stream(sensitiveColumnsRaw.split(","))
@@ -651,7 +749,14 @@ public class SyntheticDataGenerator {
      * the formal guarantee with respect to the full production dataset is
      * ε_eff = q × ε_ft (logged below), not ε_ft — at no additional noise cost.</p>
      *
-     * @return map of column name → [dpMean, dpStd]; empty if no samples available
+     * <p>The returned array per column has four elements:
+     * {@code [dpMean, dpStd, observedMin, observedMax]}.
+     * The observed min/max are used as clamp bounds in {@link #setColumnValue} to keep
+     * generated numeric values within any range CHECK constraints present in the schema,
+     * without requiring schema-specific configuration.</p>
+     *
+     * @return map of column name → [dpMean, dpStd, observedMin, observedMax];
+     *         empty if no samples available
      */
     Map<String, double[]> buildDpStats(LoadProfile profile) {
         if (profile == null || profile.getQueries() == null) return Collections.emptyMap();
@@ -685,7 +790,9 @@ public class SyntheticDataGenerator {
             double sensitivity = Math.max(m, 1.0) / n;
             double dpMean = clamp(gaussianNoise(m, sensitivity), 0.0, m * 3 + 1);
             double dpStd  = Math.max(0.1, s);
-            dpStats.put(entry.getKey(), new double[]{dpMean, dpStd});
+            double obsMin = values.stream().mapToDouble(Double::doubleValue).min().orElse(0.0);
+            double obsMax = values.stream().mapToDouble(Double::doubleValue).max().orElse(m * 3 + 1);
+            dpStats.put(entry.getKey(), new double[]{dpMean, dpStd, obsMin, obsMax});
         }
 
         if (!dpStats.isEmpty()) {

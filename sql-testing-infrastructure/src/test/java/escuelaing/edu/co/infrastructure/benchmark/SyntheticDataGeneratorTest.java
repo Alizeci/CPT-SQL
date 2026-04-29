@@ -136,7 +136,8 @@ class SyntheticDataGeneratorTest {
     @DisplayName("insertRealSanitizedData con perfil null no debe lanzar excepción")
     void insertRealSanitizedData_nullProfile_doesNotThrow() {
         Connection conn = mock(Connection.class);
-        assertThatCode(() -> generator.insertRealSanitizedData(conn, null, List.of(), Map.of()))
+        assertThatCode(() -> generator.insertRealSanitizedData(
+                conn, null, List.of(), Map.of(), Map.of(), Map.of()))
                 .doesNotThrowAnyException();
     }
 
@@ -150,7 +151,8 @@ class SyntheticDataGeneratorTest {
                 .queries(Map.of())
                 .build();
 
-        assertThatCode(() -> generator.insertRealSanitizedData(conn, emptyProfile, List.of(), Map.of()))
+        assertThatCode(() -> generator.insertRealSanitizedData(
+                conn, emptyProfile, List.of(), Map.of(), Map.of(), Map.of()))
                 .doesNotThrowAnyException();
     }
 
@@ -170,7 +172,8 @@ class SyntheticDataGeneratorTest {
                 .queries(Map.of("q1", stats))
                 .build();
 
-        assertThatCode(() -> generator.insertRealSanitizedData(conn, profile, List.of(), Map.of()))
+        assertThatCode(() -> generator.insertRealSanitizedData(
+                conn, profile, List.of(), Map.of(), Map.of(), Map.of()))
                 .doesNotThrowAnyException();
     }
 
@@ -188,7 +191,8 @@ class SyntheticDataGeneratorTest {
                 .queries(Map.of("q1", stats))
                 .build();
 
-        assertThatCode(() -> generator.insertRealSanitizedData(conn, profile, List.of(), Map.of()))
+        assertThatCode(() -> generator.insertRealSanitizedData(
+                conn, profile, List.of(), Map.of(), Map.of(), Map.of()))
                 .doesNotThrowAnyException();
     }
 }
