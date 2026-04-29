@@ -41,6 +41,9 @@ jobs:
       - name: Build executable JAR
         run: ./gradlew bootJar
 
+      - name: Reset baseline before measurement
+        run: rm -f baseline.json
+
       - name: Run benchmark and update baseline
         run: |
           java -jar ${{ inputs.jar-path }} \
