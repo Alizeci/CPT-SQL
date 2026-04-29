@@ -204,7 +204,7 @@ public class SyntheticDataGenerator {
      */
     public long computeChecksum(Connection conn, String tableName) throws SQLException {
         CRC32 crc = new CRC32();
-        String sql = "SELECT * FROM " + tableName + " ORDER BY 1";
+        String sql = "SELECT * FROM " + quoteIdent(conn, tableName) + " ORDER BY 1";
         try (PreparedStatement ps = conn.prepareStatement(sql);
              ResultSet rs = ps.executeQuery()) {
             int cols = rs.getMetaData().getColumnCount();
@@ -261,11 +261,11 @@ public class SyntheticDataGenerator {
         // Discover CHECK constraints to fill any gaps left by the production string pool.
         // Enum-like columns (e.g. status, tier) whose values never appear in query SELECT
         // results are covered here using the schema's own constraint metadata.
-        Map<String, double[]> checkNumericBounds = new HashMap<>();
-        Map<String, List<String>> checkEnumValues = discoverCheckConstraints(conn, checkNumericBounds);
+        CheckConstraints checks = discoverCheckConstraints(conn);
 
-        // Merge: production-observed values take precedence; CHECK values fill the gaps.
-        checkEnumValues.forEach(columnStringPool::putIfAbsent);
+        // Production-observed values take precedence; CHECK values fill the gaps.
+        checks.enumValues().forEach(columnStringPool::putIfAbsent);
+        Map<String, double[]> checkNumericBounds = checks.numericBounds();
 
         insertRealSanitizedData(conn, profile, sortedTables, dpStats, fkConstraints, columnStringPool, checkNumericBounds);
 
@@ -294,8 +294,9 @@ public class SyntheticDataGenerator {
      */
     private void truncateTables(Connection conn, List<String> tables) throws SQLException {
         if (tables.isEmpty()) return;
-        String tableList = tables.stream()
-                .collect(Collectors.joining(", "));
+        List<String> quotedTables = new ArrayList<>();
+        for (String t : tables) quotedTables.add(quoteIdent(conn, t));
+        String tableList = String.join(", ", quotedTables);
         try (java.sql.Statement st = conn.createStatement()) {
             st.execute("TRUNCATE TABLE " + tableList + " RESTART IDENTITY CASCADE");
         }
@@ -341,14 +342,12 @@ public class SyntheticDataGenerator {
      * generator falls back to its default behaviour for those columns.</p>
      *
      * @param conn open connection to the mirror database
-     * @return map of column_name → allowed string values (for IN constraints) or
-     *         empty list with bounds stored separately in {@code checkNumericBounds}
+     * @return {@link CheckConstraints} with enum values and numeric bounds discovered
      */
-    Map<String, List<String>> discoverCheckConstraints(
-            Connection conn,
-            Map<String, double[]> checkNumericBounds) throws SQLException {
+    CheckConstraints discoverCheckConstraints(Connection conn) throws SQLException {
 
-        Map<String, List<String>> enumValues = new HashMap<>();
+        Map<String, List<String>> enumValues    = new HashMap<>();
+        Map<String, double[]>     checkNumericBounds = new HashMap<>();
 
         String sql = """
                 SELECT pg_get_constraintdef(oid) AS def
@@ -406,7 +405,7 @@ public class SyntheticDataGenerator {
         if (!checkNumericBounds.isEmpty()) {
             LOG.info("[SyntheticData] CHECK numeric bounds discovered: " + checkNumericBounds.keySet());
         }
-        return enumValues;
+        return new CheckConstraints(enumValues, checkNumericBounds);
     }
 
     /**
@@ -539,7 +538,9 @@ public class SyntheticDataGenerator {
                     conn.releaseSavepoint(sp);
                     totalInserted++;
                 } catch (SQLException e) {
-                    LOG.warning("[SyntheticData] Real row discarded: " + e.getMessage());
+                    // Log only the SQLState (constraint type), never e.getMessage() which
+                    // can contain the offending value from the real sanitized row.
+                    LOG.warning("[SyntheticData] Real row discarded (SQLState=" + e.getSQLState() + ").");
                     conn.rollback(sp);
                 }
             }
@@ -574,9 +575,11 @@ public class SyntheticDataGenerator {
                 .toList();
         if (insertable.isEmpty()) return;
 
-        String colNames     = insertable.stream().map(c -> c.name).collect(Collectors.joining(", "));
+        List<String> quotedColNames = new ArrayList<>();
+        for (ColumnMeta c : insertable) quotedColNames.add(quoteIdent(conn, c.name));
+        String colNames     = String.join(", ", quotedColNames);
         String placeholders = insertable.stream().map(c -> "?").collect(Collectors.joining(", "));
-        String sql = "INSERT INTO " + table + " (" + colNames + ") VALUES (" + placeholders
+        String sql = "INSERT INTO " + quoteIdent(conn, table) + " (" + colNames + ") VALUES (" + placeholders
                 + ") ON CONFLICT DO NOTHING";
 
         try (PreparedStatement ps = conn.prepareStatement(sql)) {
@@ -623,9 +626,11 @@ public class SyntheticDataGenerator {
                 .toList();
         if (insertable.isEmpty()) return;
 
-        String colNames     = insertable.stream().map(c -> c.name).collect(Collectors.joining(", "));
+        List<String> quotedColNames = new ArrayList<>();
+        for (ColumnMeta c : insertable) quotedColNames.add(quoteIdent(conn, c.name));
+        String colNames     = String.join(", ", quotedColNames);
         String placeholders = insertable.stream().map(c -> "?").collect(Collectors.joining(", "));
-        String sql = "INSERT INTO " + table + " (" + colNames + ") VALUES (" + placeholders
+        String sql = "INSERT INTO " + quoteIdent(conn, table) + " (" + colNames + ") VALUES (" + placeholders
                 + ") ON CONFLICT DO NOTHING";
 
         int inserted = 0;
@@ -732,7 +737,7 @@ public class SyntheticDataGenerator {
         if (!pkCache.containsKey(tableName)) {
             List<Integer> ids = new ArrayList<>();
             try (PreparedStatement ps = conn.prepareStatement(
-                    "SELECT id FROM " + tableName + " ORDER BY random() LIMIT 500");
+                    "SELECT id FROM " + quoteIdent(conn, tableName) + " ORDER BY random() LIMIT 500");
                  ResultSet rs = ps.executeQuery()) {
                 while (rs.next()) ids.add(rs.getInt(1));
             }
@@ -941,7 +946,8 @@ public class SyntheticDataGenerator {
     private long countTotalRows(Connection conn, List<String> tables) {
         long total = 0;
         for (String table : tables) {
-            try (PreparedStatement ps = conn.prepareStatement("SELECT COUNT(*) FROM " + table);
+            try (PreparedStatement ps = conn.prepareStatement(
+                    "SELECT COUNT(*) FROM " + quoteIdent(conn, table));
                  ResultSet rs = ps.executeQuery()) {
                 if (rs.next()) total += rs.getLong(1);
             } catch (SQLException ignored) {}
@@ -972,7 +978,33 @@ public class SyntheticDataGenerator {
         return Math.max(min, Math.min(max, v));
     }
 
+    /**
+     * Returns the PostgreSQL-quoted form of {@code identifier} using
+     * {@code pg_catalog.quote_ident()}, ensuring that table and column names
+     * discovered from INFORMATION_SCHEMA are safe to embed in SQL strings
+     * even if they contain special characters or reserved words.
+     */
+    private String quoteIdent(Connection conn, String identifier) throws SQLException {
+        try (PreparedStatement ps = conn.prepareStatement("SELECT pg_catalog.quote_ident(?)")) {
+            ps.setString(1, identifier);
+            try (ResultSet rs = ps.executeQuery()) {
+                return rs.next() ? rs.getString(1) : "\"" + identifier + "\"";
+            }
+        }
+    }
+
     private record ColumnMeta(String name, String dataType, boolean nullable, String defaultValue) {}
+
+    /**
+     * Result of {@link #discoverCheckConstraints}: the two disjoint constraint maps
+     * extracted from the schema's CHECK expressions.
+     *
+     * @param enumValues    column name → allowed string values (IN / ANY constraints)
+     * @param numericBounds column name → [lo, hi] (BETWEEN / range constraints)
+     */
+    record CheckConstraints(
+            Map<String, List<String>> enumValues,
+            Map<String, double[]>     numericBounds) {}
 
     private double mean(List<Double> values) {
         if (values.isEmpty()) return 0.0;

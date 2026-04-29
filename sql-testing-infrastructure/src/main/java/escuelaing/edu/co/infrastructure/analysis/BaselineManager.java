@@ -62,8 +62,8 @@ public class BaselineManager {
         }
         try {
             BaselineFile baseline = mapper.readValue(file, BaselineFile.class);
-            return baseline.queries != null
-                    ? Collections.unmodifiableMap(baseline.queries)
+            return baseline.queries() != null
+                    ? Collections.unmodifiableMap(baseline.queries())
                     : Collections.emptyMap();
         } catch (IOException e) {
             LOG.warning("[BaselineManager] Could not read baseline.json: " + e.getMessage());
@@ -82,11 +82,11 @@ public class BaselineManager {
     }
 
     public void saveAs(BenchmarkResult result, String path) {
-        BaselineFile baseline = new BaselineFile();
-        baseline.commitSha   = result.getCommitSha();
-        baseline.profileName = result.getProfileName();
-        baseline.savedAt     = result.getExecutedAt().toString();
-        baseline.queries     = new HashMap<>(result.getQueries());
+        BaselineFile baseline = new BaselineFile(
+                result.getCommitSha(),
+                result.getProfileName(),
+                result.getExecutedAt().toString(),
+                new HashMap<>(result.getQueries()));
 
         try {
             mapper.writerWithDefaultPrettyPrinter().writeValue(new File(path), baseline);
@@ -98,14 +98,11 @@ public class BaselineManager {
 
     // Serialization model
 
-    /**
-     * Internal structure of {@code baseline.json}.
-     * Uses public fields so Jackson can serialize/deserialize without extra configuration.
-     */
-    public static class BaselineFile {
-        public String commitSha;
-        public String profileName;
-        public String savedAt;
-        public Map<String, BenchmarkResult.QueryResult> queries;
-    }
+    /** Internal structure of {@code baseline.json}. */
+    @com.fasterxml.jackson.annotation.JsonIgnoreProperties(ignoreUnknown = true)
+    public record BaselineFile(
+            String commitSha,
+            String profileName,
+            String savedAt,
+            Map<String, BenchmarkResult.QueryResult> queries) {}
 }
