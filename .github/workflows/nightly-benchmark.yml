@@ -16,7 +16,7 @@ on:
         description: 'Synthetic rows per table (high volume)'
         required: false
         type: number
-        default: 200000
+        default: 2000000
 
 jobs:
   nightly:
