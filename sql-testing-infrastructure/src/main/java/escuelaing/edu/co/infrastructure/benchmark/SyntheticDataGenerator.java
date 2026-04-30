@@ -394,7 +394,7 @@ public class SyntheticDataGenerator {
                     if (!values.isEmpty()) {
                         // Column name is the first identifier before IN or = ANY
                         java.util.regex.Matcher colM = java.util.regex.Pattern
-                                .compile("(?i)\\(?(\\w+)\\)?\\s*(?:=\\s*ANY|IN\\s*\\()")
+                                .compile("(?i)\\(?([a-zA-Z_][a-zA-Z0-9_]*)\\)?(?:::\\w+)?\\s*(?:=\\s*ANY|IN\\s*\\()")
                                 .matcher(def);
                         if (colM.find()) {
                             enumValues.put(colM.group(1).toLowerCase(), values);
