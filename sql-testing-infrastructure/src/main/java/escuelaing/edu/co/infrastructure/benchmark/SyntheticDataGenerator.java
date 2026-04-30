@@ -259,41 +259,46 @@ public class SyntheticDataGenerator {
         LOG.info("[SyntheticData] Starting mirror database population...");
         pkCache.clear();
         conn.setAutoCommit(false);
+        try {
+            List<String> tables = discoverUserTables(conn);
+            lastTablesPopulated = tables.size();
 
-        List<String> tables = discoverUserTables(conn);
-        lastTablesPopulated = tables.size();
+            Map<String, Map<String, String>> fkConstraints = discoverFkConstraints(conn);
+            List<String> sortedTables = topologicalSort(tables, fkConstraints);
 
-        Map<String, Map<String, String>> fkConstraints = discoverFkConstraints(conn);
-        List<String> sortedTables = topologicalSort(tables, fkConstraints);
+            truncateTables(conn, sortedTables);
 
-        truncateTables(conn, sortedTables);
+            Map<String, double[]> dpStats = buildDpStats(profile);
+            Map<String, List<String>> columnStringPool = buildColumnStringPool(profile);
 
-        Map<String, double[]> dpStats = buildDpStats(profile);
-        Map<String, List<String>> columnStringPool = buildColumnStringPool(profile);
+            // Discover CHECK constraints to fill any gaps left by the production string pool.
+            // Enum-like columns (e.g. status, tier) whose values never appear in query SELECT
+            // results are covered here using the schema's own constraint metadata.
+            CheckConstraints checks = discoverCheckConstraints(conn);
 
-        // Discover CHECK constraints to fill any gaps left by the production string pool.
-        // Enum-like columns (e.g. status, tier) whose values never appear in query SELECT
-        // results are covered here using the schema's own constraint metadata.
-        CheckConstraints checks = discoverCheckConstraints(conn);
+            // Production-observed values take precedence; CHECK values fill the gaps.
+            checks.enumValues().forEach(columnStringPool::putIfAbsent);
+            Map<String, double[]> checkNumericBounds = checks.numericBounds();
 
-        // Production-observed values take precedence; CHECK values fill the gaps.
-        checks.enumValues().forEach(columnStringPool::putIfAbsent);
-        Map<String, double[]> checkNumericBounds = checks.numericBounds();
+            insertRealSanitizedData(conn, profile, sortedTables, dpStats, fkConstraints, columnStringPool, checkNumericBounds);
 
-        insertRealSanitizedData(conn, profile, sortedTables, dpStats, fkConstraints, columnStringPool, checkNumericBounds);
+            for (String table : sortedTables) {
+                List<ColumnMeta> cols = describeTable(conn, table);
+                if (cols.isEmpty()) continue;
+                Map<String, String> fkCols = fkConstraints.getOrDefault(table, Collections.emptyMap());
+                insertRows(conn, table, cols, rowsPerTable, dpStats, fkCols, columnStringPool, checkNumericBounds);
+            }
 
-        for (String table : sortedTables) {
-            List<ColumnMeta> cols = describeTable(conn, table);
-            if (cols.isEmpty()) continue;
-            Map<String, String> fkCols = fkConstraints.getOrDefault(table, Collections.emptyMap());
-            insertRows(conn, table, cols, rowsPerTable, dpStats, fkCols, columnStringPool, checkNumericBounds);
+            conn.commit();
+            lastRowsGenerated = countTotalRows(conn, tables);
+            LOG.info("[SyntheticData] Mirror database populated: " + tables.size()
+                    + " tables, " + lastRowsGenerated + " rows.");
+        } catch (SQLException | RuntimeException e) {
+            try { conn.rollback(); } catch (SQLException rb) { e.addSuppressed(rb); }
+            throw e;
+        } finally {
+            conn.setAutoCommit(true);
         }
-
-        conn.commit();
-        conn.setAutoCommit(true);
-        lastRowsGenerated = countTotalRows(conn, tables);
-        LOG.info("[SyntheticData] Mirror database populated: " + tables.size()
-                + " tables, " + lastRowsGenerated + " rows.");
     }
 
     // Schema discovery
