@@ -3,6 +3,7 @@ package escuelaing.edu.co.infrastructure.analysis;
 import escuelaing.edu.co.domain.model.BenchmarkResult;
 import escuelaing.edu.co.domain.model.DegradationReport;
 import escuelaing.edu.co.domain.model.QueryEntry;
+import escuelaing.edu.co.infrastructure.dialect.DatabaseDialect;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
@@ -65,11 +66,14 @@ public class DegradationDetector {
 
     private final QueryRegistryLoader queryRegistry;
     private final BaselineManager baselineManager;
+    private final DatabaseDialect adapter;
 
     public DegradationDetector(QueryRegistryLoader queryRegistry,
-                                BaselineManager baselineManager) {
+                                BaselineManager baselineManager,
+                                DatabaseDialect adapter) {
         this.queryRegistry   = queryRegistry;
         this.baselineManager = baselineManager;
+        this.adapter         = adapter;
     }
 
     // Public API
@@ -159,8 +163,8 @@ public class DegradationDetector {
         double slaRiskPct   = current.getSlaRiskPct();
         double thresholdPct = planChangeSlaRiskThresholdPct * 100;
 
-        String baselineNode = extractRootNode(baselineResult.getExecutionPlanText());
-        String currentNode  = extractRootNode(current.getExecutionPlanText());
+        String baselineNode = adapter.parsePlanRootNode(baselineResult.getExecutionPlanText());
+        String currentNode  = adapter.parsePlanRootNode(current.getExecutionPlanText());
         boolean nodeChanged = !baselineNode.isEmpty() && !currentNode.isEmpty()
                 && !baselineNode.equalsIgnoreCase(currentNode);
 
@@ -212,19 +216,6 @@ public class DegradationDetector {
                     .description(description)
                     .build());
         }
-    }
-
-    /**
-     * Extracts the root node type from an EXPLAIN ANALYZE output.
-     * Returns the operation name before the first {@code (}, stripped of leading {@code ->}.
-     * Example: {@code "->  Index Scan using idx_cat on products  (cost=..."} → {@code "Index Scan using idx_cat on products"}.
-     */
-    private String extractRootNode(String plan) {
-        if (plan == null || plan.isBlank()) return "";
-        String firstLine = plan.strip().lines().findFirst().orElse("");
-        int paren = firstLine.indexOf('(');
-        String node = paren > 0 ? firstLine.substring(0, paren) : firstLine;
-        return node.replace("->", "").strip();
     }
 
     private void checkSloProximity(String queryId,

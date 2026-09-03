@@ -54,6 +54,17 @@ class SamplingFilterTest {
         assertThat(recorded).isBetween(50L, 200L);
     }
 
+    @Test
+    void forcedCapture_alwaysRecords_regardlessOfPriority() {
+        when(registry.get("q1")).thenReturn(entry("LOW", 300, true));
+        try (CaptureContext ignored = CaptureContext.beginForced("q1")) {
+            // LOW priority, latency 10ms well below 300ms SLA — still always records
+            for (int i = 0; i < 50; i++) {
+                assertThat(filter.shouldRecord("q1", 10L)).isTrue();
+            }
+        }
+    }
+
     private long countRecorded(String queryId, long latencyMs, int iterations) {
         long count = 0;
         for (int i = 0; i < iterations; i++) {

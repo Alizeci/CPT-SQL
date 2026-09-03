@@ -4,7 +4,7 @@ import escuelaing.edu.co.domain.model.QueryEntry;
 import escuelaing.edu.co.infrastructure.analysis.QueryRegistryLoader;
 import org.springframework.stereotype.Component;
 
-import java.util.Random;
+import java.util.concurrent.ThreadLocalRandom;
 
 /**
  * Decides whether a query execution should be recorded as a
@@ -12,6 +12,7 @@ import java.util.Random;
  *
  * <h3>Sampling rules (evaluated in order)</h3>
  * <ol>
+ *   <li>Forced capture ({@link CaptureContext#isForced()}) → always record.</li>
  *   <li>{@code priority == HIGH} → always record.</li>
  *   <li>Latency exceeds {@code maxResponseTimeMs} declared in {@code @Req}
  *       → always record (performance anomaly).</li>
@@ -27,11 +28,9 @@ public class SamplingFilter {
     private static final double DEFAULT_SAMPLE_RATE = 0.10;
 
     private final QueryRegistryLoader registryLoader;
-    private final Random random;
 
     public SamplingFilter(QueryRegistryLoader registryLoader) {
         this.registryLoader = registryLoader;
-        this.random = new Random();
     }
 
     /**
@@ -45,6 +44,10 @@ public class SamplingFilter {
             return false;
         }
 
+        if (CaptureContext.isForced()) {
+            return true;
+        }
+
         QueryEntry entry = registryLoader.get(queryId);
 
         if (entry != null) {
@@ -56,6 +59,6 @@ public class SamplingFilter {
             }
         }
 
-        return random.nextDouble() < DEFAULT_SAMPLE_RATE;
+        return ThreadLocalRandom.current().nextDouble() < DEFAULT_SAMPLE_RATE;
     }
 }

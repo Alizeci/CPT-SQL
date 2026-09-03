@@ -36,7 +36,8 @@ import java.util.stream.Collectors;
  * <h3>Exit codes</h3>
  * <ul>
  *   <li>{@code 0} — gate verdict PASS: no blocking degradations.</li>
- *   <li>{@code 1} — gate verdict FAIL: P95_EXCEEDED, SLO_PROXIMITY, or PLAN_CHANGED detected.</li>
+ *   <li>{@code 1} — gate verdict FAIL: P95_EXCEEDED, SLO_PROXIMITY, PLAN_CHANGED detected,
+ *       OR fidelity validation FAIL / error.</li>
  * </ul>
  */
 @SpringBootApplication(scanBasePackages = {"escuelaing.edu.co"})
@@ -86,13 +87,22 @@ public class BenchmarkMain {
             }
 
             // --- Synthesis fidelity validation (SynQB) ---
+            // A FAIL or thrown exception aborts the pipeline immediately so the benchmark
+            // never runs on synthetic data that does not faithfully represent production.
             try {
                 ValidationReport validationReport = fidelityValidator.performValidation(profile);
                 benchmarkRunner.persistValidationReport(validationReport);
                 System.out.println("[BenchmarkMain] VALIDATION_REPORT.json generated — "
                         + validationReport.getValidationStatus());
+                if (!validationReport.isPass()) {
+                    System.err.println("[BenchmarkMain] Fidelity validation FAILED."
+                            + " Aborting benchmark. See VALIDATION_REPORT.json.");
+                    System.exit(1);
+                }
             } catch (Exception e) {
-                System.err.println("[BenchmarkMain] Fidelity validation skipped: " + e.getMessage());
+                System.err.println("[BenchmarkMain] Fidelity validation error: " + e.getMessage()
+                        + " — aborting benchmark.");
+                System.exit(1);
             }
 
             // --- Phase 3 + Phase 4: benchmark and persistence ---

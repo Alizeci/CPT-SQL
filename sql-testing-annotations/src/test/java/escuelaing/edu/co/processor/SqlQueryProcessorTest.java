@@ -111,6 +111,44 @@ public class SqlQueryProcessorTest {
     }
 
     @Test
+    public void emitsError_whenQueryIdContainsInvalidCharacters() {
+        Compilation compilation = javac()
+            .withProcessors(new SqlQueryProcessor())
+            .compile(JavaFileObjects.forSourceString(
+                "com.example.ProductRepository",
+                "import escuelaing.edu.co.processor.annotation.*;\n" +
+                "public class ProductRepository {\n" +
+                "    @SqlQuery(queryId = \"my query!\")\n" +
+                "    @Req(maxResponseTimeMs = 100)\n" +
+                "    public void search() {}\n" +
+                "}"
+            ));
+
+        assertThat(compilation).failed();
+        assertThat(compilation)
+            .hadErrorContaining("contains characters that may cause issues");
+    }
+
+    @Test
+    public void emitsError_whenMaxResponseTimeMsIsNotPositive() {
+        Compilation compilation = javac()
+            .withProcessors(new SqlQueryProcessor())
+            .compile(JavaFileObjects.forSourceString(
+                "com.example.ProductRepository",
+                "import escuelaing.edu.co.processor.annotation.*;\n" +
+                "public class ProductRepository {\n" +
+                "    @SqlQuery(queryId = \"badSla\")\n" +
+                "    @Req(maxResponseTimeMs = -1)\n" +
+                "    public void search() {}\n" +
+                "}"
+            ));
+
+        assertThat(compilation).failed();
+        assertThat(compilation)
+            .hadErrorContaining("is not positive");
+    }
+
+    @Test
     public void methodReqOverridesClassReq_whenBothAreDeclared() {
         Compilation compilation = javac()
             .withProcessors(new SqlQueryProcessor())

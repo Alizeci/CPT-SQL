@@ -68,9 +68,33 @@ public class SqlQueryProcessor extends AbstractProcessor {
                 continue;
             }
 
+            // queryId must be a valid identifier: starts with a letter, then letters/digits/underscores.
+            // Spaces or special characters break downstream JSON keys and baseline lookups.
+            if (!queryId.matches("^[a-zA-Z][a-zA-Z0-9_]*$")) {
+                processingEnv.getMessager().printMessage(
+                    Diagnostic.Kind.ERROR,
+                    "[LoadTest] queryId '" + queryId + "' contains characters that may cause issues " +
+                    "in pipeline artifacts. Use only letters, digits, and underscores, starting with a letter.",
+                    method
+                );
+            }
+
             // @Req: method level takes precedence over class level
             Req req = method.getAnnotation(Req.class);
             if (req == null) req = enclosingClass.getAnnotation(Req.class);
+
+            // maxResponseTimeMs must be positive — a zero or negative SLA is always violated.
+            if (req != null && req.maxResponseTimeMs() <= 0) {
+                processingEnv.getMessager().printMessage(
+                    Diagnostic.Kind.ERROR,
+                    "[LoadTest] " + enclosingClass.getSimpleName() +
+                    "#" + method.getSimpleName() +
+                    " (queryId='" + queryId + "')" +
+                    " declares maxResponseTimeMs=" + req.maxResponseTimeMs() +
+                    " which is not positive. Every execution will violate the SLA.",
+                    method
+                );
+            }
 
             // Incomplete contract — detector will skip P95_EXCEEDED and SLO_PROXIMITY
             if (req == null) {

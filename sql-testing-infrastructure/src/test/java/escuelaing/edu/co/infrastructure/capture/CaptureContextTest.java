@@ -26,4 +26,27 @@ class CaptureContextTest {
         assertThat(CaptureContext.currentQueryId()).isNull();
     }
 
+    @Test
+    void beginForced_setsForcedFlag_and_close_clearsIt() {
+        assertThat(CaptureContext.isForced()).isFalse();
+        try (CaptureContext ctx = CaptureContext.beginForced("q1")) {
+            assertThat(CaptureContext.isForced()).isTrue();
+            assertThat(CaptureContext.currentQueryId()).isEqualTo("q1");
+        }
+        assertThat(CaptureContext.isForced()).isFalse();
+        assertThat(CaptureContext.currentQueryId()).isNull();
+    }
+
+    @Test
+    void innerBegin_doesNotClearForcedFlag_setByOuterBeginForced() {
+        try (CaptureContext outer = CaptureContext.beginForced("q1")) {
+            try (CaptureContext inner = CaptureContext.begin("q1")) {
+                assertThat(CaptureContext.isForced()).isTrue();
+            }
+            // inner closed — forced flag must still be true (outer owns it)
+            assertThat(CaptureContext.isForced()).isTrue();
+        }
+        assertThat(CaptureContext.isForced()).isFalse();
+    }
+
 }

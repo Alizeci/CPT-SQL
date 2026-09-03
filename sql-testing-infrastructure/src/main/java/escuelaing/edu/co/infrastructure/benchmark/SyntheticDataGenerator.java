@@ -5,11 +5,7 @@ import jakarta.annotation.PostConstruct;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
-import org.postgresql.copy.CopyManager;
-import org.postgresql.core.BaseConnection;
-
-import java.io.IOException;
-import java.io.StringReader;
+import escuelaing.edu.co.infrastructure.dialect.DatabaseDialect;
 import java.math.BigDecimal;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
@@ -71,6 +67,17 @@ import java.util.zip.CRC32;
  */
 @Component
 public class SyntheticDataGenerator {
+
+    private final DatabaseDialect adapter;
+
+    public SyntheticDataGenerator(DatabaseDialect adapter) {
+        this.adapter = adapter;
+    }
+
+    /** For tests — defaults to PostgresDialect. */
+    SyntheticDataGenerator() {
+        this(new escuelaing.edu.co.infrastructure.dialect.PostgresDialect());
+    }
 
     private static final Logger LOG = Logger.getLogger(SyntheticDataGenerator.class.getName());
 
@@ -649,11 +656,9 @@ public class SyntheticDataGenerator {
 
         List<String> quotedColNames = new ArrayList<>();
         for (ColumnMeta c : insertable) quotedColNames.add(quoteIdent(conn, c.name));
-        String colNames = String.join(", ", quotedColNames);
-        String copySql  = "COPY " + quoteIdent(conn, table) + " (" + colNames + ") FROM STDIN WITH (FORMAT CSV)";
+        String quotedTable = quoteIdent(conn, table);
 
         try {
-            CopyManager cm = new CopyManager(conn.unwrap(BaseConnection.class));
             long total = 0;
             for (int start = 0; start < rows; start += COPY_BATCH_SIZE) {
                 int batchRows = Math.min(COPY_BATCH_SIZE, rows - start);
@@ -666,11 +671,11 @@ public class SyntheticDataGenerator {
                     }
                     csv.append('\n');
                 }
-                total += cm.copyIn(copySql, new StringReader(csv.toString()));
+                total += adapter.bulkInsert(conn, quotedTable, quotedColNames, csv.toString());
             }
             LOG.info(String.format("[SyntheticData] Table '%s': %d rows inserted.", table, total));
-        } catch (IOException e) {
-            throw new SQLException("COPY failed for table '" + table + "': " + e.getMessage(), e);
+        } catch (Exception e) {
+            throw new SQLException("Bulk insert failed for table '" + table + "': " + e.getMessage(), e);
         }
     }
 

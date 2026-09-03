@@ -306,7 +306,7 @@ public class BenchmarkRunner {
             String lastPlanText = null;
             for (TransactionRecord r : qSamples) {
                 latencies.add(r.getLatencyMs());
-                totalPlanCost += QueryExecutor.extractPlanCost(r.getExecutionPlan());
+                totalPlanCost += queryExecutor.extractPlanCost(r.getExecutionPlan());
                 if (r.getExecutionPlan() != null && !r.getExecutionPlan().isBlank()) {
                     lastPlanText = r.getExecutionPlan();
                 }

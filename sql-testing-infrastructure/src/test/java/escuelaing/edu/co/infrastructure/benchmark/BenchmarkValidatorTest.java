@@ -4,7 +4,6 @@ import escuelaing.edu.co.domain.model.LoadProfile;
 import escuelaing.edu.co.domain.model.TransactionRecord;
 import escuelaing.edu.co.domain.model.validation.CardinalityFidelity;
 import escuelaing.edu.co.domain.model.validation.LatencyFidelity;
-import escuelaing.edu.co.infrastructure.analysis.QueryRegistryLoader;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -42,15 +41,14 @@ class BenchmarkValidatorTest {
     @Mock MirrorDatabaseProvisioner provisioner;
     @Mock SyntheticDataGenerator    dataGenerator;
     @Mock QueryExecutor             queryExecutor;
-    @Mock QueryRegistryLoader       queryRegistry;
     @Mock Connection                conn;
     @Mock PreparedStatement         writePs;
 
-    private BenchmarkRunner runner;
+    private FidelityValidator fidelityValidator;
 
     @BeforeEach
     void setUp() {
-        runner = new BenchmarkRunner(provisioner, dataGenerator, queryExecutor, queryRegistry);
+        fidelityValidator = new FidelityValidator(provisioner, dataGenerator, queryExecutor);
     }
 
     // -------------------------------------------------------------------------
@@ -65,7 +63,7 @@ class BenchmarkValidatorTest {
         when(queryExecutor.execute(any(Connection.class), eq("q1"), any(), anyString()))
                 .thenReturn(record("q1", 50L));
 
-        Map<String, LatencyFidelity> result = runner.validateLatencyFidelity(conn, profile);
+        Map<String, LatencyFidelity> result = fidelityValidator.validateLatencyFidelity(conn, profile);
 
         assertThat(result).containsKey("q1");
         assertThat(result.get("q1").isPass()).isTrue();
@@ -81,7 +79,7 @@ class BenchmarkValidatorTest {
         when(queryExecutor.execute(any(Connection.class), eq("q1"), any(), anyString()))
                 .thenReturn(record("q1", 105L));
 
-        Map<String, LatencyFidelity> result = runner.validateLatencyFidelity(conn, profile);
+        Map<String, LatencyFidelity> result = fidelityValidator.validateLatencyFidelity(conn, profile);
 
         assertThat(result.get("q1").isPass()).isTrue();
         assertThat(result.get("q1").getErrorPct()).isCloseTo(5.0, within(0.5));
@@ -99,7 +97,7 @@ class BenchmarkValidatorTest {
         when(queryExecutor.execute(any(Connection.class), eq("q1"), any(), anyString()))
                 .thenReturn(record("q1", 100L));
 
-        Map<String, LatencyFidelity> result = runner.validateLatencyFidelity(conn, profile);
+        Map<String, LatencyFidelity> result = fidelityValidator.validateLatencyFidelity(conn, profile);
 
         assertThat(result.get("q1").isPass()).isFalse();
         assertThat(result.get("q1").getErrorPct()).isGreaterThan(10.0);
@@ -110,7 +108,7 @@ class BenchmarkValidatorTest {
     void validateLatencyFidelity_skipsQueriesWithoutSql() {
         LoadProfile profile = profileWithLatency("q1", 50.0, null); // capturedSql = null
 
-        Map<String, LatencyFidelity> result = runner.validateLatencyFidelity(conn, profile);
+        Map<String, LatencyFidelity> result = fidelityValidator.validateLatencyFidelity(conn, profile);
 
         assertThat(result).doesNotContainKey("q1");
         verifyNoInteractions(queryExecutor);
@@ -127,7 +125,7 @@ class BenchmarkValidatorTest {
         LoadProfile profile = profileWithLatency("selectQ", 50.0, "SELECT * FROM products");
         // el stats de profileWithLatency tiene avgRowCount = 0 por defecto
 
-        Map<String, CardinalityFidelity> result = runner.validateCardinalityFidelity(conn, profile);
+        Map<String, CardinalityFidelity> result = fidelityValidator.validateCardinalityFidelity(conn, profile);
 
         assertThat(result).doesNotContainKey("selectQ");
         verifyNoInteractions(queryExecutor);
@@ -138,7 +136,7 @@ class BenchmarkValidatorTest {
     void validateCardinalityFidelity_skipsQueriesWithoutSql() {
         LoadProfile profile = profileWithLatency("q1", 50.0, null);
 
-        Map<String, CardinalityFidelity> result = runner.validateCardinalityFidelity(conn, profile);
+        Map<String, CardinalityFidelity> result = fidelityValidator.validateCardinalityFidelity(conn, profile);
 
         assertThat(result).doesNotContainKey("q1");
     }
@@ -166,7 +164,7 @@ class BenchmarkValidatorTest {
         // countWriteAffectedRows es privado; el resultado depende del driver.
         // En test sin BD real, la query falla silenciosamente → rowsSynthetic = 0.
         // Solo verificamos que la entrada aparece en el mapa de resultados.
-        Map<String, CardinalityFidelity> result = runner.validateCardinalityFidelity(conn, profile);
+        Map<String, CardinalityFidelity> result = fidelityValidator.validateCardinalityFidelity(conn, profile);
 
         assertThat(result).containsKey("updateQ");
         assertThat(result.get("updateQ").getQueryId()).isEqualTo("updateQ");

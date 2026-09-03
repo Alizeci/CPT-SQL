@@ -3,6 +3,7 @@ package escuelaing.edu.co.infrastructure.benchmark;
 import escuelaing.edu.co.domain.model.LoadProfile;
 import escuelaing.edu.co.domain.model.TestProfile;
 import escuelaing.edu.co.domain.model.TransactionRecord;
+import escuelaing.edu.co.infrastructure.dialect.DatabaseDialect;
 import org.springframework.stereotype.Component;
 
 import java.sql.Connection;
@@ -36,7 +37,12 @@ public class QueryExecutor {
     private static final String ALPHANUM =
             "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
 
+    private final DatabaseDialect adapter;
     private final Random rng = new Random();
+
+    public QueryExecutor(DatabaseDialect adapter) {
+        this.adapter = adapter;
+    }
 
     /** String parameter pool populated from the load profile before the benchmark runs. */
     private List<String> stringPool = Collections.emptyList();
@@ -196,7 +202,7 @@ public class QueryExecutor {
     // EXPLAIN ANALYZE
 
     private String captureExplainPlan(Connection conn, String sql) {
-        try (PreparedStatement ps = conn.prepareStatement("EXPLAIN ANALYZE " + sql)) {
+        try (PreparedStatement ps = conn.prepareStatement(adapter.buildExplainAnalyze(sql))) {
             StringBuilder sb = new StringBuilder();
             try (ResultSet rs = ps.executeQuery()) {
                 while (rs.next()) sb.append(rs.getString(1)).append('\n');
@@ -208,24 +214,8 @@ public class QueryExecutor {
         }
     }
 
-    /**
-     * Parses the estimated total cost from an EXPLAIN ANALYZE output.
-     * PostgreSQL reports {@code cost=X..Y} on the root node; this method returns Y.
-     *
-     * @return estimated total cost, or 0 if the output cannot be parsed
-     */
-    public static double extractPlanCost(String explainOutput) {
-        if (explainOutput == null || explainOutput.isBlank()) return 0.0;
-        int idx = explainOutput.indexOf("cost=");
-        if (idx < 0) return 0.0;
-        try {
-            String sub = explainOutput.substring(idx + 5);
-            int dotDot = sub.indexOf("..");
-            int space  = sub.indexOf(' ');
-            if (dotDot < 0 || space < 0) return 0.0;
-            return Double.parseDouble(sub.substring(dotDot + 2, space));
-        } catch (NumberFormatException e) {
-            return 0.0;
-        }
+    /** Delegates to {@link DatabaseDialect#parsePlanCost}. */
+    public double extractPlanCost(String explainOutput) {
+        return adapter.parsePlanCost(explainOutput);
     }
 }

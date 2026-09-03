@@ -16,7 +16,7 @@ on:
         description: 'Synthetic rows per table for the mirror DB'
         required: false
         type: number
-        default: 10000
+        default: 400000
     secrets:
       DB_URL:
         required: true
@@ -31,6 +31,15 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Setup Gradle with cache
+        uses: gradle/actions/setup-gradle@v3
 
       - name: Remove previous mirror container
         run: docker rm -f cpt-sql-mirror || true

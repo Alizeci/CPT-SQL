@@ -1,5 +1,6 @@
 package escuelaing.edu.co.infrastructure.benchmark;
 
+import escuelaing.edu.co.infrastructure.dialect.DatabaseDialect;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
@@ -10,6 +11,8 @@ import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.SQLException;
 import java.sql.Statement;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.logging.Logger;
 
 /**
@@ -37,6 +40,12 @@ import java.util.logging.Logger;
 public class MirrorDatabaseProvisioner {
 
     private static final Logger LOG = Logger.getLogger(MirrorDatabaseProvisioner.class.getName());
+
+    private final DatabaseDialect adapter;
+
+    public MirrorDatabaseProvisioner(DatabaseDialect adapter) {
+        this.adapter = adapter;
+    }
 
     @Value("${loadtest.mirror.host:localhost}")
     private String host;
@@ -67,7 +76,7 @@ public class MirrorDatabaseProvisioner {
      */
     public void provision() {
         ensureContainerRunning();
-        waitForPostgres();
+        waitForDatabase();
         try (Connection conn = openConnection()) {
             createSchema(conn);
         } catch (SQLException e) {
@@ -81,16 +90,24 @@ public class MirrorDatabaseProvisioner {
 
     // Docker
 
-    private void ensureContainerRunning() {
+    // package-private for unit testing
+    void ensureContainerRunning() {
         if (isContainerRunning()) {
             LOG.info("[MirrorDB] Container '" + containerName + "' is already running.");
             return;
+        }
+        try {
+            ensureContainerRemovedIfUnhealthy();
+        } catch (IOException | InterruptedException e) {
+            LOG.warning("[MirrorDB] Could not inspect/remove stale container: " + e.getMessage());
+            if (e instanceof InterruptedException) Thread.currentThread().interrupt();
         }
         LOG.info("[MirrorDB] Starting container '" + containerName + "'...");
         startContainer();
     }
 
-    private boolean isContainerRunning() {
+    // package-private for unit testing (avoids real Docker calls in CI)
+    boolean isContainerRunning() {
         try {
             Process check = new ProcessBuilder(
                     "docker", "inspect", "-f", "{{.State.Running}}", containerName)
@@ -104,15 +121,42 @@ public class MirrorDatabaseProvisioner {
         }
     }
 
-    private void startContainer() {
+    // package-private for unit testing
+    void ensureContainerRemovedIfUnhealthy() throws IOException, InterruptedException {
+        Process inspect = new ProcessBuilder(
+                "docker", "inspect", "-f", "{{.State.Status}}", containerName)
+                .redirectErrorStream(true)
+                .start();
+        inspect.waitFor();
+        String status = new String(inspect.getInputStream().readAllBytes()).strip();
+
+        // empty or "Error" means the container does not exist — nothing to remove
+        if (status.isEmpty() || status.contains("Error")) {
+            return;
+        }
+
+        // container exists but is not running — remove it so docker run can succeed
+        if (!status.equals("running")) {
+            LOG.warning("[MirrorDB] Container '" + containerName +
+                        "' exists with status='" + status + "'. Removing before recreate.");
+            new ProcessBuilder("docker", "rm", "-f", containerName)
+                    .redirectErrorStream(true)
+                    .start()
+                    .waitFor();
+        }
+    }
+
+    // package-private for unit testing
+    void startContainer() {
         try {
-            Process run = new ProcessBuilder(
-                    "docker", "run", "--name", containerName,
-                    "-e", "POSTGRES_DB=" + db,
-                    "-e", "POSTGRES_USER=" + user,
-                    "-e", "POSTGRES_PASSWORD=" + password,
-                    "-p", port + ":5432",
-                    "-d", "postgres:17")
+            List<String> cmd = new ArrayList<>();
+            cmd.add("docker"); cmd.add("run"); cmd.add("--name"); cmd.add(containerName);
+            adapter.getDockerEnv(db, user, password)
+                   .forEach((k, v) -> { cmd.add("-e"); cmd.add(k + "=" + v); });
+            cmd.add("-p"); cmd.add(port + ":" + adapter.getContainerPort());
+            cmd.add("-d"); cmd.add(adapter.getDockerImage());
+
+            Process run = new ProcessBuilder(cmd)
                     .redirectErrorStream(true)
                     .start();
             int exit = run.waitFor();
@@ -128,22 +172,24 @@ public class MirrorDatabaseProvisioner {
         }
     }
 
-    private void waitForPostgres() {
+    private void waitForDatabase() {
         long deadline = System.currentTimeMillis() + 30_000;
         while (System.currentTimeMillis() < deadline) {
-            try {
-                openConnection().close();
+            try (Connection conn = openConnection();
+                 var ps = conn.prepareStatement(adapter.getHealthCheckQuery())) {
+                ps.execute();
                 return;
             } catch (SQLException ignored) {
                 try {
                     Thread.sleep(1_000);
                 } catch (InterruptedException ie) {
                     Thread.currentThread().interrupt();
-                    throw new RuntimeException("Interrupted while waiting for PostgreSQL");
+                    throw new RuntimeException("Interrupted while waiting for database");
                 }
             }
         }
-        throw new RuntimeException("PostgreSQL did not respond within 30s at " + jdbcUrl());
+        throw new RuntimeException(adapter.getEngineName()
+                + " did not respond within 30s at " + adapter.buildJdbcUrl(host, port, db));
     }
 
     // Schema
@@ -196,6 +242,6 @@ public class MirrorDatabaseProvisioner {
     }
 
     private String jdbcUrl() {
-        return "jdbc:postgresql://" + host + ":" + port + "/" + db;
+        return adapter.buildJdbcUrl(host, port, db);
     }
 }
