@@ -1,0 +1,45 @@
+name: Benchmark — Post-merge (actualiza baseline)
+
+# Corre cuando se integra un PR a develop o main.
+# Re-ejecuta el benchmark con el código mergeado y actualiza baseline.json.
+on:
+  push:
+    branches: [main, develop]
+    paths-ignore:
+      - 'baseline.json'
+      - 'load-profile.json'
+
+jobs:
+  actualizar-baseline:
+    runs-on: self-hosted
+
+    steps:
+      # ── 1. Checkout ──────────────────────────────────────────────────────────
+      - uses: actions/checkout@v4
+
+      # ── 2. Limpieza ───────────────────────────────────────────────────────────
+      - name: Eliminar contenedor espejo previo
+        run: docker rm -f cpt-sql-mirror || true
+
+      # ── 3. Compilar ───────────────────────────────────────────────────────────
+      - name: Compilar artefacto ejecutable (fat JAR)
+        run: ./gradlew :sql-testing-demo:bootJar
+
+      # ── 4. Ejecutar benchmark y actualizar baseline ───────────────────────────
+      # BenchmarkMain en modo post-merge actualiza baseline.json directamente.
+      - name: Ejecutar benchmark y generar nuevo baseline
+        run: |
+          java -jar sql-testing-demo/build/libs/sql-testing-demo.jar \
+            --loadtest.benchmark.testProfile=light \
+            --loadtest.mirror.schema.script=sql-testing-demo/src/main/resources/schema-ecommerce.sql
+        env:
+          GITHUB_SHA: ${{ github.sha }}
+
+      # ── 5. Registrar baseline actualizado en el repositorio ───────────────────
+      - name: Registrar baseline actualizado en el repositorio
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add baseline.json
+          git diff --staged --quiet || git commit -m "chore: actualizar baseline.json post-merge [skip ci]"
+          git push
