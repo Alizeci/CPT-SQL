@@ -13,24 +13,29 @@ import java.util.Map;
 import java.util.logging.Logger;
 
 /**
- * Detecta degradaciones de rendimiento comparando el {@link BenchmarkResult}
- * contra dos fuentes de referencia:
+ * Detects performance regressions by comparing a {@link BenchmarkResult} against
+ * two reference sources:
  *
  * <ol>
- *   <li><b>Umbrales {@code @Req} (Fase 1):</b> {@code maxResponseTimeMs} y
- *       {@code allowPlanChange} declarados en el código fuente y leídos desde
- *       {@code queries.json} vía {@link QueryRegistryLoader}.</li>
- *   <li><b>Línea base histórica:</b> p95 guardado en {@code baseline.json} por
- *       el {@link BaselineManager}. Una degradación se marca cuando el p95
- *       actual supera la línea base en más de {@code baselineTolerancePct} %
- *       (10 % por defecto).</li>
+ *   <li><b>{@code @Req} thresholds (Phase 1):</b> {@code maxResponseTimeMs} and
+ *       {@code allowPlanChange} declared in source code and read from
+ *       {@code queries.json} via {@link QueryRegistryLoader}.</li>
+ *   <li><b>Historical baseline:</b> p95 stored in {@code baseline.json} by
+ *       {@link BaselineManager}. A regression is flagged when the current p95
+ *       exceeds the baseline by more than {@code baselineTolerancePct}
+ *       (10 % by default).</li>
  * </ol>
  *
- * <h3>Orden de evaluación</h3>
+ * <h3>Evaluation order</h3>
  * <ol>
- *   <li>{@code P95_EXCEEDED} — p95 medido &gt; {@code maxResponseTimeMs}.</li>
- *   <li>{@code PLAN_CHANGED} — el costo del plan cambió y {@code allowPlanChange = false}.</li>
- *   <li>{@code BASELINE_EXCEEDED} — p95 medido &gt; p95 base × (1 + tolerancia).</li>
+ *   <li>{@code P95_EXCEEDED} — measured p95 &gt; {@code maxResponseTimeMs}.</li>
+ *   <li>{@code SLO_PROXIMITY} — measured p95 &gt; {@code sloProximityPct} × SLA.</li>
+ *   <li>{@code PLAN_CHANGED} — plan cost increased beyond tolerance
+ *       <em>and</em> {@code slaRiskPct} &ge; {@code planChangeSlaRiskThresholdPct}
+ *       (50 % by default). Below that threshold the plan change is reported as
+ *       a {@code BASELINE_EXCEEDED} warning: the query is still fast, but the
+ *       nightly benchmark should confirm it holds at production volume.</li>
+ *   <li>{@code BASELINE_EXCEEDED} — measured p95 &gt; baseline p95 × (1 + tolerance).</li>
  * </ol>
  */
 @Component
@@ -46,6 +51,16 @@ public class DegradationDetector {
 
     @Value("${loadtest.detector.sloProximityPct:0.80}")
     private double sloProximityPct;
+
+    /**
+     * Minimum SLA risk percentage at which a plan cost increase becomes a blocking
+     * {@code PLAN_CHANGED}. Below this threshold the plan change is downgraded to a
+     * {@code BASELINE_EXCEEDED} warning: the query is still well within its SLA budget,
+     * so the nightly benchmark (higher volume) is the right place to confirm the impact.
+     * Default: 50 % — i.e., p95 must already consume at least half the SLA budget.
+     */
+    @Value("${loadtest.detector.planChangeSlaRiskThresholdPct:0.50}")
+    private double planChangeSlaRiskThresholdPct;
 
     private final QueryRegistryLoader queryRegistry;
     private final BaselineManager baselineManager;
@@ -95,16 +110,16 @@ public class DegradationDetector {
         degradations.removeIf(r -> r.getType() == DegradationReport.DegradationType.BASELINE_EXCEEDED
                 && blockedQueries.contains(r.getQueryId()));
 
-        boolean hasDegradations = !degradations.isEmpty();
-        LOG.info("[DegradationDetector] " + (hasDegradations
-                ? degradations.size() + " degradación(es) detectada(s)."
-                : "Sin degradaciones."));
+        boolean hasRegressions = !degradations.isEmpty();
+        LOG.info("[DegradationDetector] " + (hasRegressions
+                ? degradations.size() + " degradation(s) detected."
+                : "No degradations detected."));
 
         return DegradationReport.builder()
                 .generatedAt(Instant.now())
                 .profileName(result.getProfileName())
                 .commitSha(result.getCommitSha())
-                .hasDegradations(hasDegradations)
+                .hasDegradations(hasRegressions)
                 .degradations(degradations)
                 .build();
     }
@@ -126,7 +141,7 @@ public class DegradationDetector {
                     .observedValue(current.getP95Ms())
                     .thresholdValue(threshold)
                     .description(String.format(
-                            "[%s] p95=%.0f ms supera maxResponseTimeMs=%d ms de @Req",
+                            "[%s] p95=%.0f ms exceeds maxResponseTimeMs=%d ms (@Req)",
                             queryId, current.getP95Ms(), threshold))
                     .build());
         }
@@ -140,19 +155,42 @@ public class DegradationDetector {
         if (req == null || req.isAllowPlanChange()) return;
         if (baselineResult == null || baselineResult.getPlanCost() == 0.0) return;
 
-        double baseCost   = baselineResult.getPlanCost();
-        double tolerance  = baseCost * (1 + planCostTolerancePct);
-        if (current.getPlanCost() > tolerance) {
+        double baseCost  = baselineResult.getPlanCost();
+        double tolerance = baseCost * (1 + planCostTolerancePct);
+        if (current.getPlanCost() <= tolerance) return;
+
+        double slaRiskPct = current.getSlaRiskPct();   // 0–100 scale
+        double thresholdPct = planChangeSlaRiskThresholdPct * 100;
+
+        if (slaRiskPct >= thresholdPct) {
+            // Plan changed AND the query already consumes a significant portion of its
+            // SLA budget — block the merge.
             degradations.add(DegradationReport.Degradation.builder()
                     .queryId(queryId)
                     .type(DegradationReport.DegradationType.PLAN_CHANGED)
                     .observedValue(current.getPlanCost())
                     .thresholdValue(tolerance)
                     .description(String.format(
-                            "[%s] Costo del plan=%.2f supera la línea base=%.2f (+%d%%); " +
-                            "allowPlanChange=false",
+                            "[%s] plan cost=%.2f exceeds baseline=%.2f (+%d%%); " +
+                            "allowPlanChange=false (slaRisk=%.0f%% >= %.0f%% threshold)",
                             queryId, current.getPlanCost(), baseCost,
-                            (int)(planCostTolerancePct * 100)))
+                            (int)(planCostTolerancePct * 100), slaRiskPct, thresholdPct))
+                    .build());
+        } else {
+            // Plan changed but the query is well within its SLA budget — warn only.
+            // The nightly benchmark at production volume will confirm whether the new
+            // plan actually degrades under real data scale.
+            degradations.add(DegradationReport.Degradation.builder()
+                    .queryId(queryId)
+                    .type(DegradationReport.DegradationType.BASELINE_EXCEEDED)
+                    .observedValue(current.getPlanCost())
+                    .thresholdValue(baseCost)
+                    .description(String.format(
+                            "[%s] plan cost=%.2f increased +%d%% vs baseline — warning only " +
+                            "(p95=%.0f ms is %.0f%% of SLA; nightly will confirm at scale)",
+                            queryId, current.getPlanCost(),
+                            (int)(planCostTolerancePct * 100),
+                            current.getP95Ms(), slaRiskPct))
                     .build());
         }
     }
@@ -170,7 +208,7 @@ public class DegradationDetector {
                     .observedValue(current.getP95Ms())
                     .thresholdValue(slo)
                     .description(String.format(
-                            "[%s] p95=%.0f ms supera el SLO interno de %.0f ms (%.0f%% del SLA=%d ms) — zona de riesgo",
+                            "[%s] p95=%.0f ms exceeds internal SLO of %.0f ms (%.0f%% of SLA=%d ms) — risk zone",
                             queryId, current.getP95Ms(), slo,
                             sloProximityPct * 100, req.getMaxResponseTimeMs()))
                     .build());
@@ -192,7 +230,7 @@ public class DegradationDetector {
                     .observedValue(current.getP95Ms())
                     .thresholdValue(baseP95)
                     .description(String.format(
-                            "[%s] p95=%.0f ms — %.1fx más lento que la última medición aprobada (%.0f ms)",
+                            "[%s] p95=%.0f ms — %.1fx slower than last approved measurement (%.0f ms)",
                             queryId, current.getP95Ms(),
                             current.getP95Ms() / baseP95, baseP95))
                     .build());
