@@ -137,7 +137,7 @@ public class BenchmarkRunner {
      */
     public BenchmarkResult runWithValidation(LoadProfile profile, String commitSha, boolean validate) {
         if (validate) {
-            ValidationReport report = fidelityValidator.performValidation(profile);
+            ValidationReport report = fidelityValidator.performValidation(profile, true);
             persistValidationReport(report);
             if (!report.isPass()) {
                 throw new ValidationFailedException(report);

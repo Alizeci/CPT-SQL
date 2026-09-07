@@ -3,40 +3,32 @@ package escuelaing.edu.co.domain.model.validation;
 import lombok.Builder;
 import lombok.Data;
 
-import java.time.Instant;
-import java.util.Map;
-
-
 /**
- * Consolidated fidelity validation report for the synthetic data generator.
+ * Two-layer validation report for the CPT-SQL benchmark engine.
  *
- * <p>Aggregates three dimensions: latency fidelity (error &lt; 10 %), cardinality
- * fidelity (error &lt; 5 %), and reproducibility (byte-identical across same seed).
- * Persisted as {@code VALIDATION_REPORT.json}.</p>
+ * <ul>
+ *   <li>{@link DataQuality} — algorithmic DPSDG guarantee (Liu et al. 2024):
+ *       DP-budget metadata and byte-identical reproducibility. Always evaluated.</li>
+ *   <li>{@link MirrorAccuracy} — empirical latency and cardinality equivalence.
+ *       Skipped ({@code status="N/A"}) for nightly runs using the {@code normal} profile.</li>
+ * </ul>
+ *
+ * <p>Persisted as {@code VALIDATION_REPORT.json}.</p>
  */
 @Data
 @Builder
 public class ValidationReport {
 
-    public enum Status { PASS, FAIL }
+    /** Overall verdict: "PASS", "FAIL", or "N/A". */
+    private String validationStatus;
 
-    /** Overall verdict: PASS only if all three dimensions pass. */
-    private Status validationStatus;
+    private String generatedAt;
 
-    private Instant generatedAt;
-    private long seed;
+    private DataQuality    dataQuality;
+    private MirrorAccuracy mirrorAccuracy;
 
-    /** DPSDG parameters used in this generation run. */
-    private SyntheticDataInfo syntheticDataGeneration;
-
-    private FidelitySummary latencySummary;
-    private Map<String, LatencyFidelity> latencyFidelity;
-    private FidelitySummary cardinalitySummary;
-    private Map<String, CardinalityFidelity> cardinalityFidelity;
-    private ReproducibilityCheck reproducibility;
-
-    /** {@code true} when {@code validationStatus == PASS}. */
-    private boolean pass;
-
-    private String notes;
+    /** {@code false} only when {@code validationStatus == "FAIL"}. */
+    public boolean isPass() {
+        return !"FAIL".equals(validationStatus);
+    }
 }

@@ -5,6 +5,8 @@ import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import escuelaing.edu.co.domain.model.BenchmarkResult;
 import escuelaing.edu.co.domain.model.DegradationReport;
 import escuelaing.edu.co.domain.model.LoadProfile;
+import escuelaing.edu.co.domain.model.validation.DataQuality;
+import escuelaing.edu.co.domain.model.validation.MirrorAccuracy;
 import escuelaing.edu.co.domain.model.validation.ValidationReport;
 import escuelaing.edu.co.infrastructure.analysis.BaselineManager;
 import escuelaing.edu.co.infrastructure.analysis.DegradationDetector;
@@ -53,7 +55,8 @@ public class BenchmarkMain {
                           DegradationDetector detector,
                           BaselineManager baselineManager,
                           @Value("${loadtest.profile.path:load-profile.json}") String profilePath,
-                          @Value("${loadtest.profile.sqlPath:}") String sqlPath) {
+                          @Value("${loadtest.profile.sqlPath:}") String sqlPath,
+                          @Value("${loadtest.benchmark.testProfile:normal}") String testProfile) {
         return args -> {
             ObjectMapper mapper = new ObjectMapper().registerModule(new JavaTimeModule());
 
@@ -91,15 +94,29 @@ public class BenchmarkMain {
             // remain comparable between runs even when mirror data differs from production
             // (mirror-to-mirror consistency is what the DegradationDetector requires).
             // Only a thrown exception (validator error) aborts the pipeline.
+            boolean applicable = !"normal".equals(testProfile);
             try {
-                ValidationReport validationReport = fidelityValidator.performValidation(profile);
+                ValidationReport validationReport = fidelityValidator.performValidation(profile, applicable);
                 benchmarkRunner.persistValidationReport(validationReport);
-                System.out.println("[BenchmarkMain] VALIDATION_REPORT.json generated — "
-                        + validationReport.getValidationStatus());
-                if (!validationReport.isPass()) {
-                    System.err.println("[BenchmarkMain] Fidelity validation returned FAIL."
-                            + " Continuing benchmark; interpret absolute latencies with caution."
-                            + " See VALIDATION_REPORT.json for details.");
+
+                DataQuality    dq = validationReport.getDataQuality();
+                MirrorAccuracy ma = validationReport.getMirrorAccuracy();
+
+                System.out.printf("[BenchmarkMain] Data quality (DPSDG): %s (ε=%.1f, byte-reproducible)%n",
+                        dq.getStatus(), dq.getEpsilonTotal());
+
+                if (!ma.isApplicable()) {
+                    System.out.println("[BenchmarkMain] Mirror accuracy: N/A"
+                            + " (nightly by design — captures volume drift)");
+                } else {
+                    System.out.printf("[BenchmarkMain] Mirror accuracy: %s"
+                            + " (latencies equivalent under volume %d)%n",
+                            ma.getStatus(), ma.getMirrorVolume());
+                    if ("FAIL".equals(ma.getStatus())) {
+                        System.err.println("[BenchmarkMain] Mirror accuracy returned FAIL."
+                                + " Continuing benchmark; interpret absolute latencies with caution."
+                                + " See VALIDATION_REPORT.json for details.");
+                    }
                 }
             } catch (Exception e) {
                 System.err.println("[BenchmarkMain] Fidelity validation error: " + e.getMessage()

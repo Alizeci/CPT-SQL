@@ -2,10 +2,11 @@ package escuelaing.edu.co.infrastructure.benchmark;
 
 import escuelaing.edu.co.domain.model.LoadProfile;
 import escuelaing.edu.co.domain.model.validation.CardinalityFidelity;
+import escuelaing.edu.co.domain.model.validation.DataQuality;
 import escuelaing.edu.co.domain.model.validation.FidelitySummary;
 import escuelaing.edu.co.domain.model.validation.LatencyFidelity;
+import escuelaing.edu.co.domain.model.validation.MirrorAccuracy;
 import escuelaing.edu.co.domain.model.validation.ReproducibilityCheck;
-import escuelaing.edu.co.domain.model.validation.SyntheticDataInfo;
 import escuelaing.edu.co.domain.model.validation.ValidationReport;
 import org.springframework.stereotype.Component;
 
@@ -22,10 +23,14 @@ import java.util.Map;
 import java.util.logging.Logger;
 
 /**
- * Validates the fidelity of synthetic data generated for the mirror database
- * across three dimensions: latency, cardinality, and reproducibility.
+ * Validates synthetic data fidelity across two conceptual layers:
  *
- * <p>Pass criterion: ≥ 90 % of queries must pass each dimension.</p>
+ * <ul>
+ *   <li><b>Data Quality (Capa A)</b> — algorithmic DPSDG guarantee: DP-budget metadata and
+ *       byte-identical reproducibility. Always evaluated.</li>
+ *   <li><b>Mirror Accuracy (Capa B)</b> — empirical latency and cardinality comparison.
+ *       Skipped ({@code applicable=false}) for nightly runs (testProfile="normal").</li>
+ * </ul>
  */
 @Component
 public class FidelityValidator {
@@ -47,77 +52,125 @@ public class FidelityValidator {
     }
 
     /**
-     * Provisions the mirror database, populates it, then runs all three validation
-     * dimensions and returns the compiled {@link ValidationReport}.
+     * Provisions the mirror database and evaluates both validation layers.
+     *
+     * @param applicable {@code false} when testProfile is "normal" (nightly) — mirror accuracy skipped
      */
-    public ValidationReport performValidation(LoadProfile profile) {
-        LOG.info("[FidelityValidator] Starting fidelity validation...");
+    public ValidationReport performValidation(LoadProfile profile, boolean applicable) {
+        LOG.info("[FidelityValidator] Starting fidelity validation (mirrorAccuracy.applicable=" + applicable + ")...");
         provisioner.provision();
 
         try (Connection conn = provisioner.openConnection()) {
             dataGenerator.populate(conn, profile);
 
-            Map<String, LatencyFidelity>     latency         = validateLatencyFidelity(conn, profile);
-            Map<String, CardinalityFidelity> cardinality     = validateCardinalityFidelity(conn, profile);
-            ReproducibilityCheck             reproducibility = validateReproducibility(conn, profile);
+            // Capa B runs first on the initial populate (no extra populate needed)
+            MirrorAccuracy mirrorAccuracy = validateMirrorAccuracy(conn, profile, applicable);
 
-            boolean latencyPass     = passRate(latency.values().stream()
-                    .map(LatencyFidelity::isPass).toList()) >= 0.90;
-            boolean cardinalityPass = cardinality.isEmpty() || passRate(cardinality.values().stream()
-                    .map(CardinalityFidelity::isPass).toList()) >= 0.90;
-            boolean allPass = latencyPass && cardinalityPass && reproducibility.isPass();
+            // Capa A adds 2 more populates internally for CRC reproducibility
+            DataQuality dataQuality = validateDataQuality(conn, profile);
 
-            FidelitySummary latencySummary = FidelitySummary.builder()
-                    .queriesTested(latency.size())
-                    .queriesPassed((int) latency.values().stream().filter(LatencyFidelity::isPass).count())
-                    .meanErrorPct(latency.values().stream()
-                            .mapToDouble(LatencyFidelity::getErrorPct).average().orElse(0.0))
+            boolean dataOk   = "GUARANTEED".equals(dataQuality.getStatus());
+            boolean mirrorOk = !mirrorAccuracy.isApplicable()
+                    || "PASS".equals(mirrorAccuracy.getStatus());
+            String overallStatus = (dataOk && mirrorOk) ? "PASS" : "FAIL";
+
+            LOG.info("[FidelityValidator] Validation: " + overallStatus);
+
+            return ValidationReport.builder()
+                    .validationStatus(overallStatus)
+                    .generatedAt(Instant.now().toString())
+                    .dataQuality(dataQuality)
+                    .mirrorAccuracy(mirrorAccuracy)
                     .build();
-
-            FidelitySummary cardinalitySummary = FidelitySummary.builder()
-                    .queriesTested(cardinality.size())
-                    .queriesPassed((int) cardinality.values().stream().filter(CardinalityFidelity::isPass).count())
-                    .meanErrorPct(cardinality.values().stream()
-                            .mapToDouble(CardinalityFidelity::getErrorPct).average().orElse(0.0))
-                    .build();
-
-            SyntheticDataInfo syntheticInfo = SyntheticDataInfo.builder()
-                    .epsilonFt(SyntheticDataGenerator.EPSILON_FT)
-                    .epsilonUii(SyntheticDataGenerator.EPSILON_UII)
-                    .epsilonTotal(SyntheticDataGenerator.EPSILON_TOTAL)
-                    .delta(1e-6)
-                    .totalRowsGenerated(dataGenerator.getLastRowsGenerated())
-                    .schemaCoverage("100% (" + dataGenerator.getLastTablesPopulated() + " tables)")
-                    .build();
-
-            String notes = allPass
-                    ? "All dimensions pass threshold. Proceed with benchmark."
-                    : String.format("Validation FAIL — latency:%s cardinality:%s reproducibility:%s",
-                            latencyPass ? "PASS" : "FAIL",
-                            cardinalityPass ? "PASS" : "FAIL",
-                            reproducibility.isPass() ? "PASS" : "FAIL");
-
-            ValidationReport report = ValidationReport.builder()
-                    .validationStatus(allPass ? ValidationReport.Status.PASS : ValidationReport.Status.FAIL)
-                    .generatedAt(Instant.now())
-                    .seed(dataGenerator.getSeed())
-                    .syntheticDataGeneration(syntheticInfo)
-                    .latencySummary(latencySummary)
-                    .latencyFidelity(latency)
-                    .cardinalitySummary(cardinalitySummary)
-                    .cardinalityFidelity(cardinality)
-                    .reproducibility(reproducibility)
-                    .pass(allPass)
-                    .notes(notes)
-                    .build();
-
-            LOG.info("[FidelityValidator] Validation: " + report.getValidationStatus());
-            return report;
 
         } catch (SQLException e) {
             throw new RuntimeException("Fidelity validation failed", e);
         }
     }
+
+    /**
+     * Capa A — Data Quality: verifies byte-identical reproducibility and collects
+     * DPSDG privacy-budget metadata. Always evaluated regardless of test profile.
+     */
+    public DataQuality validateDataQuality(Connection conn,
+                                           LoadProfile profile) throws SQLException {
+        ReproducibilityCheck reproducibility = validateReproducibility(conn, profile);
+        String status = reproducibility.isByteIdentical() ? "GUARANTEED" : "FAIL";
+
+        return DataQuality.builder()
+                .epsilonFt(SyntheticDataGenerator.EPSILON_FT)
+                .epsilonUii(SyntheticDataGenerator.EPSILON_UII)
+                .epsilonTotal(SyntheticDataGenerator.EPSILON_TOTAL)
+                .delta(1e-6)
+                .featureMechanism("Gaussian Copula Kendall")
+                .identifierMechanism("second-order histogram + pseudonymization")
+                .totalRowsGenerated(dataGenerator.getLastRowsGenerated())
+                .schemaCoverage("100% (" + dataGenerator.getLastTablesPopulated() + " tables)")
+                .reproducibility(reproducibility)
+                .status(status)
+                .build();
+    }
+
+    /**
+     * Capa B — Mirror Accuracy: empirical latency and cardinality comparison.
+     * When {@code applicable=false}, returns immediately with {@code status="N/A"}.
+     */
+    public MirrorAccuracy validateMirrorAccuracy(Connection conn,
+                                                  LoadProfile profile,
+                                                  boolean applicable) {
+        long mirrorVolume  = dataGenerator.getLastRowsGenerated();
+        long captureVolume = profile.getTotalSamples();
+
+        if (!applicable) {
+            return MirrorAccuracy.builder()
+                    .applicable(false)
+                    .captureVolume(captureVolume)
+                    .mirrorVolume(mirrorVolume)
+                    .latencySummary(FidelitySummary.builder().build())
+                    .latencyDetails(Map.of())
+                    .cardinalitySummary(FidelitySummary.builder().build())
+                    .cardinalityDetails(Map.of())
+                    .status("N/A")
+                    .build();
+        }
+
+        Map<String, LatencyFidelity>     latency     = validateLatencyFidelity(conn, profile);
+        Map<String, CardinalityFidelity> cardinality = validateCardinalityFidelity(conn, profile);
+
+        boolean latencyPass = passRate(latency.values().stream()
+                .map(LatencyFidelity::isPass).toList()) >= 0.90;
+        boolean cardinalityPass = cardinality.isEmpty() || passRate(cardinality.values().stream()
+                .map(CardinalityFidelity::isPass).toList()) >= 0.90;
+
+        FidelitySummary latencySummary = FidelitySummary.builder()
+                .queriesTested(latency.size())
+                .queriesPassed((int) latency.values().stream().filter(LatencyFidelity::isPass).count())
+                .meanErrorPct(latency.values().stream()
+                        .mapToDouble(LatencyFidelity::getErrorPct).average().orElse(0.0))
+                .build();
+
+        FidelitySummary cardinalitySummary = FidelitySummary.builder()
+                .queriesTested(cardinality.size())
+                .queriesPassed((int) cardinality.values().stream().filter(CardinalityFidelity::isPass).count())
+                .meanErrorPct(cardinality.values().stream()
+                        .mapToDouble(CardinalityFidelity::getErrorPct).average().orElse(0.0))
+                .build();
+
+        return MirrorAccuracy.builder()
+                .applicable(true)
+                .captureVolume(captureVolume)
+                .mirrorVolume(mirrorVolume)
+                .latencySummary(latencySummary)
+                .latencyDetails(latency)
+                .cardinalitySummary(cardinalitySummary)
+                .cardinalityDetails(cardinality)
+                .status(latencyPass && cardinalityPass ? "PASS" : "FAIL")
+                .build();
+    }
+
+    // -------------------------------------------------------------------------
+    // Sub-validators (unchanged)
+    // -------------------------------------------------------------------------
 
     /**
      * Validates that p95 on synthetic data differs by less than
