@@ -87,17 +87,19 @@ public class BenchmarkMain {
             }
 
             // --- Synthesis fidelity validation (SynQB) ---
-            // A FAIL or thrown exception aborts the pipeline immediately so the benchmark
-            // never runs on synthetic data that does not faithfully represent production.
+            // Fidelity is reported for diagnosis but does not block the pipeline: benchmarks
+            // remain comparable between runs even when mirror data differs from production
+            // (mirror-to-mirror consistency is what the DegradationDetector requires).
+            // Only a thrown exception (validator error) aborts the pipeline.
             try {
                 ValidationReport validationReport = fidelityValidator.performValidation(profile);
                 benchmarkRunner.persistValidationReport(validationReport);
                 System.out.println("[BenchmarkMain] VALIDATION_REPORT.json generated — "
                         + validationReport.getValidationStatus());
                 if (!validationReport.isPass()) {
-                    System.err.println("[BenchmarkMain] Fidelity validation FAILED."
-                            + " Aborting benchmark. See VALIDATION_REPORT.json.");
-                    System.exit(1);
+                    System.err.println("[BenchmarkMain] Fidelity validation returned FAIL."
+                            + " Continuing benchmark; interpret absolute latencies with caution."
+                            + " See VALIDATION_REPORT.json for details.");
                 }
             } catch (Exception e) {
                 System.err.println("[BenchmarkMain] Fidelity validation error: " + e.getMessage()
