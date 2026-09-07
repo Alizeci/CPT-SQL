@@ -11,6 +11,7 @@ import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Random;
@@ -84,12 +85,16 @@ public class QueryExecutor {
                     .queryId(queryId).sql("").latencyMs(0).timestamp(Instant.now()).build();
         }
 
-        String plan   = captureExplainPlan(conn, resolvedSql);
-        Instant start = Instant.now();
-        long startNs  = System.nanoTime();
+        String  plan    = null;
+        Instant start   = Instant.now();
+        long    startNs = System.nanoTime();
 
         try (PreparedStatement ps = conn.prepareStatement(resolvedSql)) {
-            bindSyntheticParameters(ps, accessDist, zipfAlpha);
+            List<Object> params = collectAndBind(ps, accessDist, zipfAlpha);
+            plan    = captureExplainPlan(conn, resolvedSql, params);
+            start   = Instant.now();
+            startNs = System.nanoTime();
+
             String verb = resolvedSql.strip().toUpperCase();
             boolean isDml = verb.startsWith("UPDATE") || verb.startsWith("DELETE")
                     || (verb.startsWith("INSERT") && !verb.contains("RETURNING"));
@@ -134,9 +139,10 @@ public class QueryExecutor {
      * UNIFORM or ZIPF distribution: with ZIPF, lower IDs are selected more
      * frequently — P(k) ∝ k^{-α}.</p>
      */
-    private void bindSyntheticParameters(PreparedStatement ps,
-                                          TestProfile.AccessDistribution dist,
-                                          double zipfAlpha) throws SQLException {
+    private List<Object> collectAndBind(PreparedStatement ps,
+                                        TestProfile.AccessDistribution dist,
+                                        double zipfAlpha) {
+        List<Object> params = new ArrayList<>();
         try {
             java.sql.ParameterMetaData meta = ps.getParameterMetaData();
             for (int i = 1; i <= meta.getParameterCount(); i++) {
@@ -146,23 +152,23 @@ public class QueryExecutor {
                 } catch (SQLException ex) {
                     sqlType = java.sql.Types.INTEGER;
                 }
+                Object value;
                 switch (sqlType) {
                     case java.sql.Types.VARCHAR,
                          java.sql.Types.CHAR,
                          java.sql.Types.LONGVARCHAR,
-                         java.sql.Types.NVARCHAR ->
-                            ps.setString(i, randomString());
-                    default -> {
-                        int value = (dist == TestProfile.AccessDistribution.ZIPF)
-                                ? zipfInt(500, zipfAlpha)
-                                : syntheticInt(1, 500);
-                        ps.setInt(i, value);
-                    }
+                         java.sql.Types.NVARCHAR -> value = randomString();
+                    default -> value = (dist == TestProfile.AccessDistribution.ZIPF)
+                            ? zipfInt(500, zipfAlpha)
+                            : syntheticInt(1, 500);
                 }
+                ps.setObject(i, value);
+                params.add(value);
             }
         } catch (SQLException ignored) {
             // Some JDBC drivers throw on getParameterMetaData — safe to skip binding
         }
+        return params;
     }
 
     /**
@@ -201,15 +207,18 @@ public class QueryExecutor {
 
     // EXPLAIN ANALYZE
 
-    private String captureExplainPlan(Connection conn, String sql) {
+    private String captureExplainPlan(Connection conn, String sql, List<Object> params) {
         try (PreparedStatement ps = conn.prepareStatement(adapter.buildExplainAnalyze(sql))) {
+            for (int i = 0; i < params.size(); i++) {
+                ps.setObject(i + 1, params.get(i));
+            }
             StringBuilder sb = new StringBuilder();
             try (ResultSet rs = ps.executeQuery()) {
                 while (rs.next()) sb.append(rs.getString(1)).append('\n');
             }
             return sb.toString();
         } catch (SQLException e) {
-            LOG.fine("[QueryExecutor] EXPLAIN ANALYZE unavailable: " + e.getMessage());
+            LOG.warning("[QueryExecutor] EXPLAIN ANALYZE failed for query: " + e.getMessage());
             return null;
         }
     }
