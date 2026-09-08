@@ -27,9 +27,9 @@ import java.util.logging.Logger;
  * Validates synthetic data fidelity across two conceptual layers:
  *
  * <ul>
- *   <li><b>Data Quality (Capa A)</b> — algorithmic DPSDG guarantee: DP-budget metadata and
+ *   <li><b>Data Quality (Layer A)</b> — algorithmic DPSDG guarantee: DP-budget metadata and
  *       byte-identical reproducibility. Always evaluated.</li>
- *   <li><b>Mirror Accuracy (Capa B)</b> — empirical latency and cardinality comparison.
+ *   <li><b>Mirror Accuracy (Layer B)</b> — empirical latency and cardinality comparison.
  *       Skipped ({@code applicable=false}) for nightly runs (testProfile="normal").</li>
  * </ul>
  */
@@ -74,10 +74,10 @@ public class FidelityValidator {
         try (Connection conn = provisioner.openConnection()) {
             dataGenerator.populate(conn, profile);
 
-            // Capa B runs first on the initial populate (no extra populate needed)
+            // Layer B runs first on the initial populate (no extra populate needed)
             MirrorAccuracy mirrorAccuracy = validateMirrorAccuracy(conn, profile, applicable);
 
-            // Capa A adds 2 more populates internally for CRC reproducibility
+            // Layer A adds 2 more populates internally for CRC reproducibility
             DataQuality dataQuality = validateDataQuality(conn, profile);
 
             boolean dataOk   = "GUARANTEED".equals(dataQuality.getStatus());
@@ -100,7 +100,7 @@ public class FidelityValidator {
     }
 
     /**
-     * Capa A — Data Quality: verifies byte-identical reproducibility and collects
+     * Layer A — Data Quality: verifies byte-identical reproducibility and collects
      * DPSDG privacy-budget metadata. Always evaluated regardless of test profile.
      */
     public DataQuality validateDataQuality(Connection conn,
@@ -123,7 +123,7 @@ public class FidelityValidator {
     }
 
     /**
-     * Capa B — Mirror Accuracy: empirical latency and cardinality comparison.
+     * Layer B — Mirror Accuracy: empirical latency and cardinality comparison.
      * When {@code applicable=false}, returns immediately with {@code status="N/A"}.
      */
     public MirrorAccuracy validateMirrorAccuracy(Connection conn,
