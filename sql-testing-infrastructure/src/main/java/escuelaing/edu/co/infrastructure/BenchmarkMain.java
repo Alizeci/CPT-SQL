@@ -110,8 +110,8 @@ public class BenchmarkMain {
                             + " (nightly by design — captures volume drift)");
                 } else {
                     System.out.printf("[BenchmarkMain] Mirror accuracy: %s"
-                            + " (latencies equivalent under volume %d)%n",
-                            ma.getStatus(), ma.getMirrorVolume());
+                            + " (mirror volume: %d rows/table)%n",
+                            ma.getStatus(), ma.getMirrorRowsPerTable());
                     if ("FAIL".equals(ma.getStatus())) {
                         System.err.println("[BenchmarkMain] Mirror accuracy returned FAIL."
                                 + " Continuing benchmark; interpret absolute latencies with caution."

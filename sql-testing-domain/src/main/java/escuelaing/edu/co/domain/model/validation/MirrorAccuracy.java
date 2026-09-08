@@ -19,11 +19,17 @@ public class MirrorAccuracy {
     /** {@code false} for nightly ({@code testProfile=normal}) — status will be "N/A". */
     private boolean applicable;
 
-    /** Total samples in the production capture profile (Phase 2). */
-    private long captureVolume;
+    /**
+     * Rows per table in the production capture database.
+     * Set to 0 when the value is unknown (e.g. pre-seed baseline).
+     */
+    private long captureRowsPerTable;
 
-    /** Rows generated in the mirror database for this validation run. */
-    private long mirrorVolume;
+    /**
+     * Rows per table generated in the mirror database.
+     * Corresponds to {@code loadtest.synthetic.rowsPerTable}.
+     */
+    private long mirrorRowsPerTable;
 
     private FidelitySummary latencySummary;
     private Map<String, LatencyFidelity>     latencyDetails;

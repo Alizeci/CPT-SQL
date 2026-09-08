@@ -170,6 +170,7 @@ public class SyntheticDataGenerator {
 
     public long getLastRowsGenerated()  { return lastRowsGenerated; }
     public int  getLastTablesPopulated() { return lastTablesPopulated; }
+    public int  getRowsPerTable()        { return rowsPerTable; }
 
     // Column classification: Feature vs UII
 

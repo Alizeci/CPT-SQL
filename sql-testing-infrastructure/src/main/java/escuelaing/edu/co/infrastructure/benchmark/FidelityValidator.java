@@ -118,14 +118,14 @@ public class FidelityValidator {
     public MirrorAccuracy validateMirrorAccuracy(Connection conn,
                                                   LoadProfile profile,
                                                   boolean applicable) {
-        long mirrorVolume  = dataGenerator.getLastRowsGenerated();
-        long captureVolume = profile.getTotalSamples();
+        long mirrorRowsPerTable  = dataGenerator.getRowsPerTable();
+        long captureRowsPerTable = 0; // populated once dev-seed is available
 
         if (!applicable) {
             return MirrorAccuracy.builder()
                     .applicable(false)
-                    .captureVolume(captureVolume)
-                    .mirrorVolume(mirrorVolume)
+                    .captureRowsPerTable(captureRowsPerTable)
+                    .mirrorRowsPerTable(mirrorRowsPerTable)
                     .latencySummary(FidelitySummary.builder().build())
                     .latencyDetails(Map.of())
                     .cardinalitySummary(FidelitySummary.builder().build())
@@ -158,8 +158,8 @@ public class FidelityValidator {
 
         return MirrorAccuracy.builder()
                 .applicable(true)
-                .captureVolume(captureVolume)
-                .mirrorVolume(mirrorVolume)
+                .captureRowsPerTable(captureRowsPerTable)
+                .mirrorRowsPerTable(mirrorRowsPerTable)
                 .latencySummary(latencySummary)
                 .latencyDetails(latency)
                 .cardinalitySummary(cardinalitySummary)
