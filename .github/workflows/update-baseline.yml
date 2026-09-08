@@ -63,13 +63,3 @@ jobs:
           git diff --staged --quiet || git commit -m "chore: update baseline.json post-merge [skip ci]"
           git pull --rebase origin ${{ github.ref_name }}
           git push
-
-      - name: Upload benchmark artifacts
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: update-baseline-${{ github.sha }}
-          path: |
-            build/results/
-            build/validation/
-          retention-days: 90
