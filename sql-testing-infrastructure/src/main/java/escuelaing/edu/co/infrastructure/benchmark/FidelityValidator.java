@@ -8,6 +8,7 @@ import escuelaing.edu.co.domain.model.validation.LatencyFidelity;
 import escuelaing.edu.co.domain.model.validation.MirrorAccuracy;
 import escuelaing.edu.co.domain.model.validation.ReproducibilityCheck;
 import escuelaing.edu.co.domain.model.validation.ValidationReport;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
 import java.sql.Connection;
@@ -38,6 +39,9 @@ public class FidelityValidator {
     private static final Logger LOG = Logger.getLogger(FidelityValidator.class.getName());
 
     private static final int VALIDATION_RUNS = 5;
+
+    @Value("${loadtest.capture.rowsPerTable:0}")
+    private long captureRowsPerTable;
 
     private final MirrorDatabaseProvisioner provisioner;
     private final SyntheticDataGenerator    dataGenerator;
@@ -118,8 +122,7 @@ public class FidelityValidator {
     public MirrorAccuracy validateMirrorAccuracy(Connection conn,
                                                   LoadProfile profile,
                                                   boolean applicable) {
-        long mirrorRowsPerTable  = dataGenerator.getRowsPerTable();
-        long captureRowsPerTable = 0; // populated once dev-seed is available
+        long mirrorRowsPerTable = dataGenerator.getRowsPerTable();
 
         if (!applicable) {
             return MirrorAccuracy.builder()
