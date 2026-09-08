@@ -18,9 +18,9 @@ import static org.assertj.core.api.Assertions.within;
 import static org.mockito.Mockito.mock;
 
 /**
- * Verifica la lógica del algoritmo DPSDG: clasificación de columnas,
- * generación de pseudónimos UII, reproducibilidad con mismo seed, y
- * comportamiento de {@code insertRealSanitizedData} ante perfiles vacíos.
+ * Validates the DPSDG algorithm logic: column classification,
+ * UII pseudonym generation, reproducibility with the same seed, and
+ * behaviour of {@code insertRealSanitizedData} with empty profiles.
  */
 class SyntheticDataGeneratorTest {
 
@@ -33,11 +33,11 @@ class SyntheticDataGeneratorTest {
     }
 
     // -------------------------------------------------------------------------
-    // classifyColumn — separación Feature / UII (SynQB §3.2)
+    // classifyColumn — Feature / UII split (SynQB §3.2)
     // -------------------------------------------------------------------------
 
     @Test
-    @DisplayName("user_id y customer_id deben clasificarse como IDENTIFIER")
+    @DisplayName("user_id and customer_id must be classified as IDENTIFIER")
     void classifyColumn_userIdColumns() {
         assertThat(generator.classifyColumn("orders", "user_id")).isEqualTo(IDENTIFIER);
         assertThat(generator.classifyColumn("orders", "customer_id")).isEqualTo(IDENTIFIER);
@@ -45,7 +45,7 @@ class SyntheticDataGeneratorTest {
     }
 
     @Test
-    @DisplayName("columnas _id deben clasificarse como IDENTIFIER")
+    @DisplayName("_id columns must be classified as IDENTIFIER")
     void classifyColumn_transactionIdColumns() {
         assertThat(generator.classifyColumn("orders",      "id")).isEqualTo(IDENTIFIER);
         assertThat(generator.classifyColumn("order_items", "order_id")).isEqualTo(IDENTIFIER);
@@ -53,7 +53,7 @@ class SyntheticDataGeneratorTest {
     }
 
     @Test
-    @DisplayName("columnas de negocio deben clasificarse como FEATURE")
+    @DisplayName("business columns must be classified as FEATURE")
     void classifyColumn_featureColumns() {
         assertThat(generator.classifyColumn("products", "price")).isEqualTo(FEATURE);
         assertThat(generator.classifyColumn("products", "rating")).isEqualTo(FEATURE);
@@ -63,16 +63,16 @@ class SyntheticDataGeneratorTest {
     }
 
     // -------------------------------------------------------------------------
-    // generateUiiPseudonym — rango exclusivo [10001, 99999]
+    // generateUiiPseudonym — exclusive range [10001, 99999]
     // -------------------------------------------------------------------------
 
     @Test
-    @DisplayName("todos los pseudónimos UII deben estar en [10001, 99999]")
+    @DisplayName("all UII pseudonyms must be in [10001, 99999]")
     void generateUiiPseudonym_isInExclusiveRange() {
         for (int i = 0; i < 200; i++) {
             int id = generator.generateUiiPseudonym();
             assertThat(id)
-                    .as("el pseudónimo debe estar en el rango exclusivo para evitar colisión con IDs reales")
+                    .as("pseudonym must be in the exclusive range to avoid collision with real IDs")
                     .isBetween(10_001, 99_999);
         }
     }
@@ -82,7 +82,7 @@ class SyntheticDataGeneratorTest {
     // -------------------------------------------------------------------------
 
     @Test
-    @DisplayName("gaussianNoise con el mismo seed debe producir valores idénticos")
+    @DisplayName("gaussianNoise with the same seed must produce identical values")
     void gaussianNoise_isReproducibleWithSameSeed() {
         generator.setSeed(42);
         double v1 = generator.gaussianNoise(100.0, 20.0);
@@ -94,7 +94,7 @@ class SyntheticDataGeneratorTest {
     }
 
     @Test
-    @DisplayName("gaussianNoise con seeds distintos debe producir valores diferentes (en general)")
+    @DisplayName("gaussianNoise with different seeds must produce different values (in general)")
     void gaussianNoise_differsBetweenSeeds() {
         generator.setSeed(42);
         double v1 = generator.gaussianNoise(100.0, 20.0);
@@ -102,14 +102,14 @@ class SyntheticDataGeneratorTest {
         generator.setSeed(99);
         double v2 = generator.gaussianNoise(100.0, 20.0);
 
-        // Con seeds diferentes la distribución cambia; no son iguales para base=100, sigma=20
+        // Different seeds change the distribution; values differ for base=100, sigma=20
         assertThat(v1).isNotEqualTo(v2);
     }
 
     @Test
-    @DisplayName("gaussianNoise aplica el presupuesto ε_ft como divisor del sigma")
+    @DisplayName("gaussianNoise applies the ε_ft budget as sigma divisor")
     void gaussianNoise_appliesEpsilonScale() {
-        // Con sigma = 0 y cualquier ε, el ruido debe ser exactamente base
+        // With sigma = 0 and any ε, the noise must equal the base exactly
         generator.setSeed(42);
         double result = generator.gaussianNoise(50.0, 0.0);
         assertThat(result).isCloseTo(50.0, within(0.001));
@@ -120,7 +120,7 @@ class SyntheticDataGeneratorTest {
     // -------------------------------------------------------------------------
 
     @Test
-    @DisplayName("ε_total = ε_ft + ε_uii = 1.0 por composición secuencial")
+    @DisplayName("ε_total = ε_ft + ε_uii = 1.0 by sequential composition")
     void epsilonTotalEqualsSum() {
         assertThat(SyntheticDataGenerator.EPSILON_TOTAL)
                 .isCloseTo(SyntheticDataGenerator.EPSILON_FT + SyntheticDataGenerator.EPSILON_UII,
@@ -129,11 +129,11 @@ class SyntheticDataGeneratorTest {
     }
 
     // -------------------------------------------------------------------------
-    // insertRealSanitizedData — manejo defensivo ante inputs inválidos
+    // insertRealSanitizedData — defensive handling of invalid inputs
     // -------------------------------------------------------------------------
 
     @Test
-    @DisplayName("insertRealSanitizedData con perfil null no debe lanzar excepción")
+    @DisplayName("insertRealSanitizedData with null profile must not throw")
     void insertRealSanitizedData_nullProfile_doesNotThrow() {
         Connection conn = mock(Connection.class);
         assertThatCode(() -> generator.insertRealSanitizedData(
@@ -142,7 +142,7 @@ class SyntheticDataGeneratorTest {
     }
 
     @Test
-    @DisplayName("insertRealSanitizedData con perfil vacío no debe lanzar excepción")
+    @DisplayName("insertRealSanitizedData with empty profile must not throw")
     void insertRealSanitizedData_emptyProfile_doesNotThrow() {
         Connection conn = mock(Connection.class);
         LoadProfile emptyProfile = LoadProfile.builder()
@@ -157,7 +157,7 @@ class SyntheticDataGeneratorTest {
     }
 
     @Test
-    @DisplayName("insertRealSanitizedData con sanitizedRealData null en todas las queries no falla")
+    @DisplayName("insertRealSanitizedData with null sanitizedRealData on all queries must not throw")
     void insertRealSanitizedData_nullSanitizedData_doesNotThrow() {
         Connection conn = mock(Connection.class);
         LoadProfile.QueryStats stats = LoadProfile.QueryStats.builder()
@@ -178,7 +178,7 @@ class SyntheticDataGeneratorTest {
     }
 
     @Test
-    @DisplayName("insertRealSanitizedData con sanitizedRealData vacía no falla")
+    @DisplayName("insertRealSanitizedData with empty sanitizedRealData must not throw")
     void insertRealSanitizedData_emptySanitizedData_doesNotThrow() {
         Connection conn = mock(Connection.class);
         LoadProfile.QueryStats stats = LoadProfile.QueryStats.builder()

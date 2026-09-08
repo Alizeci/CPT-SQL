@@ -9,16 +9,16 @@ import java.io.IOException;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * Verifica la lógica de la máquina de estados de {@link MirrorDatabaseProvisioner}:
+ * Validates the state-machine logic of {@link MirrorDatabaseProvisioner}:
  *
  * <ul>
- *   <li><b>running</b>      — no invoca cleanup ni start.</li>
- *   <li><b>not running</b>  — invoca {@code ensureContainerRemovedIfUnhealthy()} ANTES de start.</li>
- *   <li><b>not running</b>  — siempre invoca {@code startContainer()} tras la limpieza.</li>
+ *   <li><b>running</b>      — does not invoke cleanup or start.</li>
+ *   <li><b>not running</b>  — invokes {@code ensureContainerRemovedIfUnhealthy()} BEFORE start.</li>
+ *   <li><b>not running</b>  — always invokes {@code startContainer()} after cleanup.</li>
  * </ul>
  *
- * <p>{@link FakeProvisioner} sustituye las tres operaciones Docker con stubs controlados,
- * aislando la lógica de orquestación sin requerir un daemon Docker real.</p>
+ * <p>{@link FakeProvisioner} replaces the three Docker operations with controlled stubs,
+ * isolating the orchestration logic without requiring a real Docker daemon.</p>
  */
 class MirrorDatabaseProvisionerContainerCleanupTest {
 
@@ -54,7 +54,7 @@ class MirrorDatabaseProvisionerContainerCleanupTest {
     }
 
     @Test
-    @DisplayName("not running → cleanup llamado antes de start")
+    @DisplayName("not running → cleanup called before start")
     void not_running_calls_cleanup_then_start() {
         FakeProvisioner p = new FakeProvisioner(false);
         p.ensureContainerRunning();
@@ -63,11 +63,11 @@ class MirrorDatabaseProvisionerContainerCleanupTest {
     }
 
     @Test
-    @DisplayName("not running → start siempre ocurre tras cleanup")
+    @DisplayName("not running → start always occurs after cleanup")
     void not_running_always_starts_after_cleanup() {
         FakeProvisioner p = new FakeProvisioner(false);
         p.ensureContainerRunning();
-        // orden garantizado: cleanup primero, start después
+        // guaranteed order: cleanup first, start after
         assertThat(p.cleanupCalled).isTrue();
         assertThat(p.startCalled).isTrue();
     }
