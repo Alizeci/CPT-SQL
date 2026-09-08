@@ -13,6 +13,7 @@ import java.sql.ResultSet;
 import java.sql.ResultSetMetaData;
 import java.sql.SQLException;
 import java.sql.Savepoint;
+import java.sql.Statement;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
@@ -298,6 +299,25 @@ public class SyntheticDataGenerator {
             }
 
             conn.commit();
+
+            // Update planner statistics after bulk load.
+            // Without this, pg_statistic is stale post-COPY: the planner assumes
+            // default selectivity, falls back to Seq Scan, and produces
+            // unrepresentative Mirror Accuracy measurements. VACUUM ANALYZE also
+            // reclaims dead pages from the preceding TRUNCATE.
+            try (Statement stAnalyze = conn.createStatement()) {
+                conn.setAutoCommit(true); // VACUUM cannot run inside an explicit transaction
+                for (String table : sortedTables) {
+                    stAnalyze.execute("VACUUM ANALYZE " + quoteIdent(conn, table));
+                    LOG.info("[SyntheticData] VACUUM ANALYZE completed: " + table);
+                }
+            } catch (SQLException e) {
+                LOG.warning("[SyntheticData] VACUUM ANALYZE failed: " + e.getMessage()
+                        + " — mirror latencies may be non-representative");
+            } finally {
+                conn.setAutoCommit(false); // restore for subsequent operations
+            }
+
             lastRowsGenerated = countTotalRows(conn, tables);
             LOG.info("[SyntheticData] Mirror database populated: " + tables.size()
                     + " tables, " + lastRowsGenerated + " rows.");
