@@ -58,7 +58,7 @@ class BenchmarkValidatorTest {
     @Test
     @DisplayName("latencyFidelity PASS cuando p95 sintético ≈ p95 real (error < 10 %)")
     void validateLatencyFidelity_pass_whenSynMatchesReal() {
-        // p95 real = 50 ms; todos los 5 runs sintéticos devuelven 50 ms → error = 0 %
+        // p95 real = 50 ms; todos los runs sintéticos devuelven 50 ms → error = 0 %
         LoadProfile profile = profileWithLatency("q1", 50.0, "SELECT 1");
         when(queryExecutor.execute(any(Connection.class), eq("q1"), any(), anyString()))
                 .thenReturn(record("q1", 50L));

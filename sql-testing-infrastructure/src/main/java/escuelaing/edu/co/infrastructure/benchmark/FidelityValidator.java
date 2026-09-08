@@ -38,7 +38,14 @@ public class FidelityValidator {
 
     private static final Logger LOG = Logger.getLogger(FidelityValidator.class.getName());
 
-    private static final int VALIDATION_RUNS = 5;
+    /**
+     * Executions per query in {@link #validateLatencyFidelity}.
+     * N=50 ensures nearest-rank p95 is statistically stable (Hyndman & Fan 1996).
+     * N=5 produced p95 = max(5 values) = p100, which is methodologically indefensible.
+     * Configurable via {@code loadtest.fidelity.validationRuns} in application.properties.
+     */
+    @Value("${loadtest.fidelity.validationRuns:50}")
+    private int validationRuns = 50;
 
     @Value("${loadtest.capture.rowsPerTable:0}")
     private long captureRowsPerTable;
@@ -137,6 +144,12 @@ public class FidelityValidator {
                     .build();
         }
 
+        // Symmetry with BenchmarkRunner: bind query parameters with values drawn from the
+        // production string pool sanitized during capture. Without this, randomString()
+        // returns synthetic strings that never match real category values, retrieving 0 rows
+        // and reporting unrepresentative sub-millisecond latencies.
+        queryExecutor.setStringPool(dataGenerator.buildStringPool(profile));
+
         Map<String, LatencyFidelity>     latency     = validateLatencyFidelity(conn, profile);
         Map<String, CardinalityFidelity> cardinality = validateCardinalityFidelity(conn, profile);
 
@@ -188,7 +201,7 @@ public class FidelityValidator {
             if (stats.getCapturedSql() == null) continue;
 
             List<Long> latencies = new ArrayList<>();
-            for (int i = 0; i < VALIDATION_RUNS; i++) {
+            for (int i = 0; i < validationRuns; i++) {
                 latencies.add(queryExecutor.execute(conn, qid, stats, stats.getCapturedSql()).getLatencyMs());
             }
             Collections.sort(latencies);
