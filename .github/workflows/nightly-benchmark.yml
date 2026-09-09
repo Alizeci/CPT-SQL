@@ -55,12 +55,13 @@ jobs:
           git diff --staged --quiet || git commit -m "chore: update baseline-nightly.json [skip ci]"
           git push
 
-      - name: Upload result artifacts
+      - name: Archive nightly result artifacts locally on runner
         if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: nightly-benchmark-${{ github.sha }}
-          path: |
-            baseline-nightly.json
-            build/results/
-            build/validation/
+        run: |
+          ARTIFACT_DIR="$HOME/cpt-sql-artifacts-nightly/${{ github.sha }}"
+          mkdir -p "$ARTIFACT_DIR"
+          [ -f baseline-nightly.json ] && cp baseline-nightly.json "$ARTIFACT_DIR/" || true
+          [ -d build/results ] && cp -r build/results "$ARTIFACT_DIR/" || true
+          [ -d build/validation ] && cp -r build/validation "$ARTIFACT_DIR/" || true
+          echo "[Artifacts] Saved to $ARTIFACT_DIR"
+          ls -la "$ARTIFACT_DIR"
