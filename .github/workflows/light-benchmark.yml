@@ -89,14 +89,15 @@ jobs:
             -d "{\"body\": $BODY}" \
             "https://api.github.com/repos/${{ github.repository }}/issues/${{ github.event.pull_request.number }}/comments"
 
-      - name: Upload result artifacts
+      - name: Archive result artifacts locally on runner
         if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: benchmark-${{ github.sha }}
-          path: |
-            load-profile.json
-            load-profile-pr.json
-            baseline.json
-            build/results/
-            build/validation/
+        run: |
+          ARTIFACT_DIR="$HOME/cpt-sql-artifacts/${{ github.sha }}"
+          mkdir -p "$ARTIFACT_DIR"
+          [ -f load-profile.json ] && cp load-profile.json "$ARTIFACT_DIR/" || true
+          [ -f load-profile-pr.json ] && cp load-profile-pr.json "$ARTIFACT_DIR/" || true
+          [ -f baseline.json ] && cp baseline.json "$ARTIFACT_DIR/" || true
+          [ -d build/results ] && cp -r build/results "$ARTIFACT_DIR/" || true
+          [ -d build/validation ] && cp -r build/validation "$ARTIFACT_DIR/" || true
+          echo "[Artifacts] Saved to $ARTIFACT_DIR"
+          ls -la "$ARTIFACT_DIR"
