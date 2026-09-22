@@ -1,0 +1,59 @@
+CPT-SQL: Continuous Performance Testing for SQL Queries
+Copyright 2026 Laura Alejandra Izquierdo Castro
+
+This product includes software developed as part of a Master's thesis in
+Informatics at Escuela Colombiana de Ingeniería Julio Garavito (2026),
+under the supervision of Andrés Gómez Casanova.
+
+Academic reference:
+  Izquierdo Castro, L. A. (2026). Diseño y desarrollo de un sistema de
+  pruebas de carga continua para consultas SQL durante el ciclo de vida
+  del software [Trabajo de grado de maestría]. Escuela Colombiana de
+  Ingeniería Julio Garavito.
+
+--------------------------------------------------------------------------
+Third-party dependencies
+--------------------------------------------------------------------------
+
+This product includes software developed by the following projects:
+
+  Spring Framework (Apache License 2.0)
+    https://spring.io/projects/spring-framework
+    Copyright (c) Broadcom Inc. and its subsidiaries.
+
+  Spring Boot (Apache License 2.0)
+    https://spring.io/projects/spring-boot
+    Copyright (c) Broadcom Inc. and its subsidiaries.
+
+  Jackson (Apache License 2.0)
+    https://github.com/FasterXML/jackson
+    Copyright (c) FasterXML, LLC.
+
+  PostgreSQL JDBC Driver (BSD 2-Clause License)
+    https://jdbc.postgresql.org/
+    Copyright (c) 1997, PostgreSQL Global Development Group.
+
+  Project Lombok (MIT License)
+    https://projectlombok.org/
+    Copyright (c) 2009-2024 The Project Lombok Authors.
+
+  Jakarta Annotations API (Eclipse Public License 2.0 / GPL 2.0 with
+  Classpath Exception)
+    https://projects.eclipse.org/projects/ee4j.ca
+    Copyright (c) Eclipse Foundation.
+
+--------------------------------------------------------------------------
+Algorithmic references
+--------------------------------------------------------------------------
+
+The synthetic data generator implements an adaptation of the DPSDG
+(Differentially-Private Synthetic Data Generation) algorithm described in:
+
+  Liu, X., et al. (2024). SynQB: Enabling Differentially-Private Synthetic
+  Data Generation for Query Benchmarking. Meta Platforms.
+
+The differential privacy foundations follow:
+
+  Dwork, C., & Roth, A. (2014). The algorithmic foundations of differential
+  privacy. Foundations and Trends in Theoretical Computer Science, 9(3-4),
+  211-407.
