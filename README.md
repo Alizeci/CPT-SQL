@@ -1,12 +1,8 @@
 # CPT-SQL: Continuous Performance Testing for SQL Queries
 
-Framework Java para detección continua de degradaciones de rendimiento
-en consultas SQL, integrado con pipelines de CI/CD.
+Implementación de referencia en Java de una metodología de detección continua de degradaciones de rendimiento en consultas SQL, integrada con pipelines de CI/CD.
 
-Opera a lo largo del ciclo de vida del software: desde la declaración
-del contrato de rendimiento en tiempo de compilación, la captura de
-tráfico real en producción, la validación pre-merge en cada pull request
-y la confirmación a escala mediante benchmarks nocturnos.
+Opera a lo largo del ciclo de vida del software: desde la declaración del contrato de rendimiento en tiempo de compilación, la captura de tráfico real en producción, la validación pre-merge en cada pull request y la confirmación a escala mediante benchmarks nocturnos.
 
 ## Cómo funciona
 
@@ -22,8 +18,7 @@ flowchart LR
     H --> I[Confirma impacto real<br/>y proyecta crecimiento]
 ```
 
-1. El desarrollador declara el contrato de rendimiento directamente
-   en el código Java:
+1. El desarrollador declara el contrato de rendimiento directamente en el código Java:
 
    ```java
    @SqlQuery(queryId = "searchProductsByCategory")
@@ -31,28 +26,19 @@ flowchart LR
    public List<Product> searchProducts(String category) { ... }
    ```
 
-2. En cada pull request, CPT-SQL ejecuta un benchmark ligero sobre una
-   base de datos espejo poblada con datos sintéticos privados y compara
-   el resultado contra el baseline aprobado.
+2. En cada pull request, CPT-SQL ejecuta un benchmark ligero sobre una base de datos espejo poblada con datos sintéticos privados y compara el resultado contra el baseline aprobado.
 
-3. Si el plan de ejecución cambia estructuralmente o la latencia se
-   acerca al SLA declarado, el pipeline bloquea el merge y publica un
-   comentario en el pull request explicando la degradación detectada.
+3. Si el plan de ejecución cambia estructuralmente o la latencia se acerca al SLA declarado, el pipeline bloquea el merge y publica un comentario en el pull request explicando la degradación detectada.
 
-4. Un benchmark nocturno a escala productiva (2M filas) confirma que
-   las degradaciones se materializan a volumen real y proyecta el
-   comportamiento futuro ante el crecimiento orgánico de los datos.
+4. Un benchmark nocturno a escala productiva (2M filas) confirma que las degradaciones se materializan a volumen real y proyecta el comportamiento futuro ante el crecimiento orgánico de los datos.
 
 ## Arquitectura
 
 Tres módulos Maven independientes:
 
-- **`sql-testing-annotations`** — contrato declarativo (`@SqlQuery`, `@Req`)
-  procesado en tiempo de compilación.
-- **`sql-testing-domain`** — modelos de dominio compartidos (LoadProfile,
-  BenchmarkResult, DegradationReport, ValidationReport).
-- **`sql-testing-infrastructure`** — ejecución operativa: captura JDBC,
-  benchmark, detección y dialecto de motor.
+- **`sql-testing-annotations`** — contrato declarativo (`@SqlQuery`, `@Req`) procesado en tiempo de compilación.
+- **`sql-testing-domain`** — modelos de dominio compartidos (LoadProfile, BenchmarkResult, DegradationReport, ValidationReport).
+- **`sql-testing-infrastructure`** — ejecución operativa: captura JDBC, benchmark, detección y dialecto de motor.
 
 ## Requisitos
 
@@ -80,14 +66,11 @@ Java 17+ · PostgreSQL 14+ · Docker · Maven o Gradle
 
 ## Configuración
 
-Propiedades Spring en `application.properties`. Solo
-`loadtest.mirror.schema.script` es obligatorio; el resto tiene
-defaults calibrados.
+Propiedades Spring en `application.properties`. Solo `loadtest.mirror.schema.script` es obligatorio. El resto tiene defaults calibrados.
 
 ### Detector de degradaciones
 
-Los cuatro umbrales que gobiernan el gate del pipeline. Todos se
-prefijan con `loadtest.detector.`.
+Los cuatro umbrales que gobiernan el gate del pipeline. Todos se prefijan con `loadtest.detector.`.
 
 | Propiedad | Default | Criterio | Qué hace |
 |---|---|---|---|
@@ -102,7 +85,7 @@ prefijan con `loadtest.detector.`.
 |---|---|---|
 | `loadtest.mirror.schema.script` | requerido | Ruta al DDL del esquema del consumidor |
 | `loadtest.synthetic.rowsPerTable` | 400000 | Filas sintéticas por tabla del esquema espejo |
-| `loadtest.synthetic.seed` | autogenerado | Semilla del generador; fijarla garantiza reproducibilidad byte-idéntica |
+| `loadtest.synthetic.seed` | autogenerado | Semilla del generador. Fijarla garantiza reproducibilidad idéntica byte a byte |
 | `loadtest.fidelity.validationRuns` | 50 | Iteraciones por consulta en la validación de fidelidad |
 | `loadtest.sla.complianceThresholdPct` | 0.95 | Fracción mínima de operaciones dentro del SLA para veredicto PASS |
 
@@ -115,29 +98,22 @@ prefijan con `loadtest.detector.`.
 | `update-baseline.yml` | Post-merge | Actualiza `baseline.json` con el resultado de la rama principal |
 | `capture-production-profile.yml` | Manual | Captura de perfil de tráfico real desde producción |
 
-## Extensión a otros motores
+## Extensión a otros ecosistemas
 
-El framework aísla los puntos motor-dependientes tras la interfaz
-`DatabaseDialect` (10 métodos organizados en aprovisionamiento,
-inserción masiva y análisis de planes). La implementación de referencia
-es `PostgresDialect`; `MysqlDialect` se distribuye como esqueleto no
-integrado en el pipeline actual.
+El framework aísla los puntos dependientes del motor tras la interfaz `DatabaseDialect` (10 métodos organizados en aprovisionamiento, inserción masiva y análisis de planes). La implementación de referencia es `PostgresDialect`; `MysqlDialect` se distribuye como esqueleto no integrado en el pipeline actual.
+
+Los principios metodológicos (contrato declarativo, interceptación a nivel del driver, motor de benchmark sobre base espejo, integración CI/CD) son transferibles a otros ecosistemas mediante mecanismos análogos: decoradores en Python, atributos en C#, y capas equivalentes de interceptación como DB-API o ADO.NET.
 
 ## Ejemplo de uso
 
-Ver el proyecto de referencia [sql-testing-demo](https://github.com/Alizeci/sql-testing-demo),
-que implementa un e-commerce Java con seis consultas anotadas y los
-cuatro workflows CI/CD integrados.
+Ver el proyecto de referencia [sql-testing-demo](https://github.com/Alizeci/sql-testing-demo), que implementa un e-commerce Java con seis consultas anotadas y los cuatro workflows CI/CD integrados.
 
 ## Documentación académica
 
 Especificación técnica completa disponible en el Trabajo de Grado:
 
-> Izquierdo Castro, L. A. (2026). *Diseño y desarrollo de un sistema
-> de pruebas de carga continua para consultas SQL durante el ciclo
-> de vida del software*. Escuela Colombiana de Ingeniería Julio Garavito.
+> Izquierdo Castro, L. A. (2026). *Diseño y desarrollo de un sistema de pruebas de carga continua para consultas SQL durante el ciclo de vida del software*. Escuela Colombiana de Ingeniería Julio Garavito.
 
 ## Licencia
 
-Distribuido bajo [Apache License 2.0](LICENSE.txt). Ver [`NOTICE`](NOTICE)
-para atribuciones específicas.
+Distribuido bajo [Apache License 2.0](LICENSE.txt). Ver [`NOTICE`](NOTICE) para atribuciones específicas.
