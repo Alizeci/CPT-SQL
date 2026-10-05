@@ -14,6 +14,8 @@ import java.util.Map;
  * CPT_DP_EPSILON_NUMERIC=0.6
  * CPT_DP_EPSILON_CATEGORICAL=0.4
  * CPT_DP_DELTA=1e-6
+ * CPT_DP_EPSILON_FK=0.4              # foreign-key degree shape; 0 disables it
+ * CPT_DP_CATEGORICAL=products.category,orders.status   # declared categorical columns (table-level release)
  * CPT_DP_KEEP_SANITIZED_ROWS=false    # debugging only — keeps raw sanitized rows in the profile
  * </pre>
  *
@@ -25,11 +27,21 @@ public record DpConfig(Map<String, double[]> bounds,
                        double epsilonNumeric,
                        double epsilonCategorical,
                        double delta,
-                       boolean keepSanitizedRows) {
+                       boolean keepSanitizedRows,
+                       double epsilonForeignKey,
+                       java.util.List<String> categoricalColumns) {
 
     public static final double DEFAULT_EPSILON_NUMERIC     = 0.6;
     public static final double DEFAULT_EPSILON_CATEGORICAL = 0.4;
     public static final double DEFAULT_DELTA               = 1e-6;
+    public static final double DEFAULT_EPSILON_FK          = 0.4;
+
+    /** Backwards-compatible constructor (foreign-key release with the default budget). */
+    public DpConfig(Map<String, double[]> bounds, double epsilonNumeric, double epsilonCategorical,
+                    double delta, boolean keepSanitizedRows) {
+        this(bounds, epsilonNumeric, epsilonCategorical, delta, keepSanitizedRows, DEFAULT_EPSILON_FK,
+                java.util.List.of());
+    }
 
     public static DpConfig defaults() {
         return new DpConfig(Collections.emptyMap(), DEFAULT_EPSILON_NUMERIC,
@@ -42,7 +54,24 @@ public record DpConfig(Map<String, double[]> bounds,
                 Double.parseDouble(env("CPT_DP_EPSILON_NUMERIC", String.valueOf(DEFAULT_EPSILON_NUMERIC))),
                 Double.parseDouble(env("CPT_DP_EPSILON_CATEGORICAL", String.valueOf(DEFAULT_EPSILON_CATEGORICAL))),
                 Double.parseDouble(env("CPT_DP_DELTA", String.valueOf(DEFAULT_DELTA))),
-                Boolean.parseBoolean(env("CPT_DP_KEEP_SANITIZED_ROWS", "false")));
+                Boolean.parseBoolean(env("CPT_DP_KEEP_SANITIZED_ROWS", "false")),
+                Double.parseDouble(env("CPT_DP_EPSILON_FK", String.valueOf(DEFAULT_EPSILON_FK))),
+                parseColumns(env("CPT_DP_CATEGORICAL", "")));
+    }
+
+    /** Parses {@code "table.col,table2.col2"} (lower-cased, blanks ignored). */
+    public static java.util.List<String> parseColumns(String raw) {
+        java.util.List<String> out = new java.util.ArrayList<>();
+        if (raw == null || raw.isBlank()) return out;
+        for (String part : raw.split(",")) {
+            String p = part.trim().toLowerCase();
+            if (p.isEmpty()) continue;
+            if (!p.matches("[a-z_][a-z0-9_]*\\.[a-z_][a-z0-9_]*")) {
+                throw new IllegalArgumentException("Invalid categorical column '" + part + "' — expected table.column");
+            }
+            out.add(p);
+        }
+        return java.util.Collections.unmodifiableList(out);
     }
 
     /** Parses {@code "col:lo:hi,col2:lo:hi"} (column names are lower-cased). */

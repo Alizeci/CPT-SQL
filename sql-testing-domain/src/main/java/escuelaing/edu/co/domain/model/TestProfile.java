@@ -80,12 +80,13 @@ public class TestProfile {
 
     /**
      * Lightweight profile for per-commit pre-test (CI Level 1).
-     * 10 s warm-up to stabilise the PostgreSQL buffer cache, then 30 s measurement.
+     * 10 s warm-up to stabilise the PostgreSQL buffer cache, then 60 s measurement
+     * (raised from 30 s in v25 to roughly double the samples per query).
      */
     public static TestProfile light() {
         return TestProfile.builder()
                 .name("light")
-                .description("Per-commit pre-test: 10 s warm-up + 30 s measurement")
+                .description("Per-commit pre-test: 10 s warm-up + 60 s measurement")
                 .executionMode(ExecutionMode.CLOSED_LOOP)
                 .accessDistribution(AccessDistribution.UNIFORM)
                 .thinkTimeMs(150)
@@ -101,7 +102,7 @@ public class TestProfile {
                         Phase.builder()
                                 .name("measure")
                                 .targetTps(10)
-                                .durationSecs(30)
+                                .durationSecs(60)
                                 .mixturePreset(MixturePreset.DEFAULT)
                                 .throughputFunction(ThroughputFunction.STEP)
                                 .measurement(true)

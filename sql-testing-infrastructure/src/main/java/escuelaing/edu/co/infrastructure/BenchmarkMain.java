@@ -102,8 +102,9 @@ public class BenchmarkMain {
                 DataQuality    dq = validationReport.getDataQuality();
                 MirrorAccuracy ma = validationReport.getMirrorAccuracy();
 
-                System.out.printf("[BenchmarkMain] Data quality (DPSDG): %s (ε=%.1f, byte-reproducible)%n",
-                        dq.getStatus(), dq.getEpsilonTotal());
+                System.out.printf("[BenchmarkMain] Data quality: %s, privacy=%s (ε=%.1f, δ=%.0e), FK shapes=%d%n",
+                        dq.getStatus(), dq.getPrivacyMode(), dq.getEpsilonTotal(), dq.getDelta(),
+                        dq.getDpForeignKeys() != null ? dq.getDpForeignKeys().size() : 0);
 
                 if (!ma.isApplicable()) {
                     System.out.println("[BenchmarkMain] Mirror accuracy: N/A"
@@ -119,7 +120,10 @@ public class BenchmarkMain {
                     }
                 }
             } catch (Exception e) {
+                Throwable root = e;
+                while (root.getCause() != null && root.getCause() != root) root = root.getCause();
                 System.err.println("[BenchmarkMain] Fidelity validation error: " + e.getMessage()
+                        + (root != e ? " — root cause: " + root : "")
                         + " — aborting benchmark.");
                 System.exit(1);
             }

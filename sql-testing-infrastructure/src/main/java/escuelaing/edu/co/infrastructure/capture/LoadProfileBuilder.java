@@ -40,6 +40,8 @@ public class LoadProfileBuilder {
 
     private final MetricsBuffer metricsBuffer;
     private DpConfig dpConfig;
+    private Map<String, DpRelease.ForeignKeyDegree> foreignKeyRelease = Collections.emptyMap();
+    private DpRelease tableRelease;
 
     @org.springframework.beans.factory.annotation.Autowired
     public LoadProfileBuilder(MetricsBuffer metricsBuffer) {
@@ -65,6 +67,24 @@ public class LoadProfileBuilder {
      *
      * @return load profile; may contain zero entries if no samples are available
      */
+    /**
+     * Attaches the foreign-key degree release computed by {@link FkDegreeProfiler} against
+     * the capture database. It is merged into the profile's {@link DpRelease}.
+     */
+    public LoadProfileBuilder withForeignKeyRelease(Map<String, DpRelease.ForeignKeyDegree> release) {
+        this.foreignKeyRelease = release != null ? release : Collections.emptyMap();
+        return this;
+    }
+
+    /**
+     * Uses a table-level release computed by {@link TableProfiler} over the whole capture
+     * tables instead of the row-level release over the rows the application read.
+     */
+    public LoadProfileBuilder withTableRelease(DpRelease release) {
+        this.tableRelease = release;
+        return this;
+    }
+
     public LoadProfile build() {
         metricsBuffer.forceFlush();
         return buildFrom(metricsBuffer.drainFlushed());
@@ -110,9 +130,24 @@ public class LoadProfileBuilder {
                 .map(TransactionRecord::getSanitizedData)
                 .filter(d -> d != null && !d.isEmpty())
                 .collect(Collectors.toList());
-        DpRelease dpRelease = allSanitized.isEmpty()
-                ? null
-                : new DpReleaseBuilder(dpConfig).build(allSanitized);
+        DpRelease dpRelease = tableRelease != null
+                ? tableRelease
+                : allSanitized.isEmpty() ? null : new DpReleaseBuilder(dpConfig).build(allSanitized);
+        if (!foreignKeyRelease.isEmpty()) {
+            if (dpRelease == null) {
+                dpRelease = DpRelease.builder()
+                        .mechanism(DpReleaseBuilder.MECHANISM)
+                        .delta(dpConfig.delta())
+                        .numeric(Collections.emptyMap())
+                        .categorical(Collections.emptyMap())
+                        .suppressedColumns(List.of())
+                        .build();
+            }
+            dpRelease.setMechanism(dpRelease.getMechanism() + "; " + FkDegreeProfiler.MECHANISM);
+            dpRelease.setEpsilonForeignKey(dpConfig.epsilonForeignKey());
+            dpRelease.setDeltaForeignKey(dpConfig.delta());
+            dpRelease.setForeignKeys(new java.util.TreeMap<>(foreignKeyRelease));
+        }
 
         return LoadProfile.builder()
                 .generatedAt(Instant.now())
