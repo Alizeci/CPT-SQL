@@ -34,6 +34,13 @@ public class DegradationReport {
     /** List of detected degradations (empty when {@code hasDegradations == false}). */
     private List<Degradation> degradations;
 
+    /**
+     * "COMPARABLE", "MISSING" (first run) or "INCOMPATIBLE: reason". When not comparable,
+     * baseline-relative criteria (BASELINE_EXCEEDED, PLAN_CHANGED) are skipped and only
+     * the contract criteria (P95_EXCEEDED, SLO_PROXIMITY) are evaluated.
+     */
+    private String baselineStatus;
+
     // -------------------------------------------------------------------------
 
     /** Type of detected degradation. */

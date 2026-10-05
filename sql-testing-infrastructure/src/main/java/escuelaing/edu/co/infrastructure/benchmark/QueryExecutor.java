@@ -14,6 +14,7 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import java.util.Map;
 import java.util.Random;
 import java.util.logging.Logger;
 
@@ -39,10 +40,39 @@ public class QueryExecutor {
             "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
 
     private final DatabaseDialect adapter;
-    private final Random rng = new Random();
+
+    /**
+     * Seeded generator for synthetic parameters. Reseeded at the start of each run
+     * ({@link #reseed}) so that the parameter sequence is reproducible across runs.
+     */
+    private Random rng = new Random(42);
 
     public QueryExecutor(DatabaseDialect adapter) {
         this.adapter = adapter;
+    }
+
+    /**
+     * Per-statement timeout on the mirror database (default 60 s).
+     *
+     * <p>A severely degraded query must produce a measurable result, not hang the job until
+     * the CI timeout kills it and every measurement is lost. When the limit is reached the
+     * statement is cancelled and recorded with a latency equal to the limit, so it is
+     * reported as {@code P95_EXCEEDED} with its own diagnostic message.</p>
+     */
+    @org.springframework.beans.factory.annotation.Value("${loadtest.benchmark.statementTimeoutMs:60000}")
+    private long statementTimeoutMs = 60_000;
+
+    /** Number of statements cancelled by the timeout in the current JVM (reported in the log). */
+    private long timedOutStatements = 0;
+
+    public long getTimedOutStatements() { return timedOutStatements; }
+
+    private int timeoutSeconds() {
+        return (int) Math.max(1, Math.ceil(statementTimeoutMs / 1000.0));
+    }
+
+    private static boolean isTimeout(SQLException e) {
+        return e instanceof java.sql.SQLTimeoutException || "57014".equals(e.getSQLState());
     }
 
     /** String parameter pool populated from the load profile before the benchmark runs. */
@@ -51,6 +81,36 @@ public class QueryExecutor {
     /** Sets the string parameter pool built from production sanitized data. */
     public void setStringPool(List<String> pool) {
         this.stringPool = pool != null ? pool : Collections.emptyList();
+    }
+
+    /** Numeric column model (col → [mean, std, lower, upper]) from the DP release. */
+    private Map<String, double[]> columnStats = Collections.emptyMap();
+
+    /** Categorical value pools per column from the DP release. */
+    private Map<String, List<String>> columnPools = Collections.emptyMap();
+
+    /**
+     * Sets the per-column parameter model derived from the DP release, so that
+     * parameters bound to a known column (e.g. {@code price BETWEEN ? AND ?},
+     * {@code category = ?}) follow the released distribution of that column instead
+     * of a generic uniform range. Columns without a model keep the previous behaviour.
+     */
+    public void setParameterModel(Map<String, double[]> stats, Map<String, List<String>> pools) {
+        this.columnStats = stats != null ? stats : Collections.emptyMap();
+        this.columnPools = pools != null ? pools : Collections.emptyMap();
+    }
+
+    /** Resets the parameter generator so that runs with the same seed bind the same values. */
+    public void reseed(long seed) {
+        this.rng = new Random(seed);
+    }
+
+    /**
+     * Binds synthetic parameters to {@code ps} (uniform access distribution) and returns them.
+     * Used by fidelity validation to execute captured write statements.
+     */
+    public List<Object> bindParameters(PreparedStatement ps, String sql) {
+        return collectAndBind(ps, sql, TestProfile.AccessDistribution.UNIFORM, 1.0);
     }
 
     // Public API
@@ -89,8 +149,10 @@ public class QueryExecutor {
         Instant start   = Instant.now();
         long    startNs = System.nanoTime();
 
+        boolean timedOut = false;
         try (PreparedStatement ps = conn.prepareStatement(resolvedSql)) {
-            List<Object> params = collectAndBind(ps, accessDist, zipfAlpha);
+            ps.setQueryTimeout(timeoutSeconds());
+            List<Object> params = collectAndBind(ps, resolvedSql, accessDist, zipfAlpha);
             plan    = captureExplainPlan(conn, resolvedSql, params);
             start   = Instant.now();
             startNs = System.nanoTime();
@@ -106,10 +168,21 @@ public class QueryExecutor {
                 }
             }
         } catch (SQLException e) {
-            LOG.warning("[QueryExecutor] Error executing '" + queryId + "': " + e.getMessage());
+            if (isTimeout(e)) {
+                timedOut = true;
+                timedOutStatements++;
+            } else {
+                LOG.warning("[QueryExecutor] Error executing '" + queryId + "': " + e.getMessage());
+            }
         }
 
         long latencyMs = (System.nanoTime() - startNs) / 1_000_000;
+        if (timedOut) {
+            // Record at least the limit so the degradation is visible in p95 / SLA compliance.
+            latencyMs = Math.max(latencyMs, statementTimeoutMs);
+            LOG.warning("[QueryExecutor] '" + queryId + "' cancelled after " + statementTimeoutMs
+                    + " ms (statement timeout) — recorded as " + latencyMs + " ms (severe degradation).");
+        }
 
         return TransactionRecord.builder()
                 .queryId(queryId)
@@ -135,32 +208,62 @@ public class QueryExecutor {
     /**
      * Binds synthetic parameters to the prepared statement.
      *
-     * <p>String parameters receive a random sample value. Integer parameters use
-     * UNIFORM or ZIPF distribution: with ZIPF, lower IDs are selected more
-     * frequently — P(k) ∝ k^{-α}.</p>
+     * <p>Each placeholder is first mapped to the column it is compared with
+     * ({@link #mapParametersToColumns}). When the DP release provides a model for that
+     * column, the value is drawn from it: numeric columns from N(mean, std) clamped to the
+     * declared bounds (for {@code BETWEEN ? AND ?} two values are drawn and ordered), string
+     * columns from the released histogram. Identifier columns and columns without a model
+     * fall back to the original behaviour: integers in [1, 500] (UNIFORM or ZIPF) and strings
+     * from the shared pool.</p>
      */
     private List<Object> collectAndBind(PreparedStatement ps,
+                                        String sql,
                                         TestProfile.AccessDistribution dist,
                                         double zipfAlpha) {
         List<Object> params = new ArrayList<>();
         try {
             java.sql.ParameterMetaData meta = ps.getParameterMetaData();
-            for (int i = 1; i <= meta.getParameterCount(); i++) {
+            int count = meta.getParameterCount();
+            List<ParamSlot> slots = mapParametersToColumns(sql, count);
+            Object pendingHigh = null;
+            for (int i = 1; i <= count; i++) {
                 int sqlType;
                 try {
                     sqlType = meta.getParameterType(i);
                 } catch (SQLException ex) {
                     sqlType = java.sql.Types.INTEGER;
                 }
+                ParamSlot slot = slots.get(i - 1);
                 Object value;
-                switch (sqlType) {
-                    case java.sql.Types.VARCHAR,
-                         java.sql.Types.CHAR,
-                         java.sql.Types.LONGVARCHAR,
-                         java.sql.Types.NVARCHAR -> value = randomString();
-                    default -> value = (dist == TestProfile.AccessDistribution.ZIPF)
-                            ? zipfInt(500, zipfAlpha)
-                            : syntheticInt(1, 500);
+                if (slot.role == Role.BETWEEN_HIGH && pendingHigh != null) {
+                    value = pendingHigh;
+                    pendingHigh = null;
+                } else if (slot.column != null && columnStats.containsKey(slot.column)
+                        && !slot.column.endsWith("id")) {
+                    double[] m = columnStats.get(slot.column);
+                    if (slot.role == Role.BETWEEN_LOW) {
+                        double a = sampleColumn(m), b = sampleColumn(m);
+                        value       = typed(Math.min(a, b), sqlType);
+                        pendingHigh = typed(Math.max(a, b), sqlType);
+                    } else if (slot.role == Role.INCREMENT) {
+                        value = typed(1 + rng.nextInt(5), sqlType);
+                    } else {
+                        value = typed(sampleColumn(m), sqlType);
+                    }
+                } else if (slot.column != null && columnPools.containsKey(slot.column)
+                        && !columnPools.get(slot.column).isEmpty()) {
+                    List<String> pool = columnPools.get(slot.column);
+                    value = pool.get(rng.nextInt(pool.size()));
+                } else {
+                    switch (sqlType) {
+                        case java.sql.Types.VARCHAR,
+                             java.sql.Types.CHAR,
+                             java.sql.Types.LONGVARCHAR,
+                             java.sql.Types.NVARCHAR -> value = randomString();
+                        default -> value = (dist == TestProfile.AccessDistribution.ZIPF)
+                                ? zipfInt(500, zipfAlpha)
+                                : syntheticInt(1, 500);
+                    }
                 }
                 ps.setObject(i, value);
                 params.add(value);
@@ -169,6 +272,79 @@ public class QueryExecutor {
             // Some JDBC drivers throw on getParameterMetaData — safe to skip binding
         }
         return params;
+    }
+
+    private double sampleColumn(double[] model) {
+        double v = model[0] + rng.nextGaussian() * model[1];
+        return Math.max(model[2], Math.min(model[3], v));
+    }
+
+    private static Object typed(double v, int sqlType) {
+        return switch (sqlType) {
+            case java.sql.Types.INTEGER, java.sql.Types.SMALLINT, java.sql.Types.TINYINT -> (int) Math.round(v);
+            case java.sql.Types.BIGINT -> Math.round(v);
+            case java.sql.Types.NUMERIC, java.sql.Types.DECIMAL ->
+                    java.math.BigDecimal.valueOf(Math.round(v * 100) / 100.0);
+            default -> v;
+        };
+    }
+
+    // Placeholder → column mapping
+
+    enum Role { COMPARE, BETWEEN_LOW, BETWEEN_HIGH, INCREMENT, INSERT_VALUE, UNKNOWN }
+
+    record ParamSlot(String column, Role role) {}
+
+    private static final java.util.regex.Pattern BETWEEN_LOW_P = java.util.regex.Pattern.compile(
+            "(?i)(?:\\w+\\.)?(\\w+)\\s+BETWEEN\\s*$");
+    private static final java.util.regex.Pattern BETWEEN_HIGH_P = java.util.regex.Pattern.compile(
+            "(?i)(?:\\w+\\.)?(\\w+)\\s+BETWEEN\\s*\\?\\s+AND\\s*$");
+    private static final java.util.regex.Pattern INCREMENT_P = java.util.regex.Pattern.compile(
+            "(?i)(?:\\w+\\.)?(\\w+)\\s*[+-]\\s*$");
+    private static final java.util.regex.Pattern COMPARE_P = java.util.regex.Pattern.compile(
+            "(?i)(?:\\w+\\.)?(\\w+)\\s*(?:=|<>|!=|<=|>=|<|>|\\bLIKE\\b)\\s*$");
+    private static final java.util.regex.Pattern INSERT_P = java.util.regex.Pattern.compile(
+            "(?is)INSERT\\s+INTO\\s+\\S+\\s*\\(([^)]*)\\)\\s*VALUES\\s*\\(([^)]*)\\)");
+
+    /**
+     * Maps each {@code ?} placeholder of {@code sql} (in order) to the column it refers to.
+     * Recognises {@code col = ?} (and other comparisons), {@code col BETWEEN ? AND ?},
+     * {@code col = col + ?} and positional {@code INSERT INTO t (cols) VALUES (...)}.
+     * Unrecognised placeholders get {@link Role#UNKNOWN}.
+     */
+    static List<ParamSlot> mapParametersToColumns(String sql, int expected) {
+        List<ParamSlot> slots = new ArrayList<>();
+        if (sql != null) {
+            java.util.regex.Matcher ins = INSERT_P.matcher(sql);
+            List<String> insertCols = new ArrayList<>();
+            if (ins.find()) {
+                String[] cols = ins.group(1).split(",");
+                String[] vals = ins.group(2).split(",");
+                for (int k = 0; k < vals.length && k < cols.length; k++) {
+                    if (vals[k].trim().equals("?")) insertCols.add(cols[k].trim().toLowerCase());
+                }
+            }
+            int insertIdx = 0;
+            for (int pos = sql.indexOf('?'); pos >= 0; pos = sql.indexOf('?', pos + 1)) {
+                String before = sql.substring(Math.max(0, pos - 120), pos);
+                java.util.regex.Matcher m;
+                if ((m = BETWEEN_HIGH_P.matcher(before)).find()) {
+                    slots.add(new ParamSlot(m.group(1).toLowerCase(), Role.BETWEEN_HIGH));
+                } else if ((m = BETWEEN_LOW_P.matcher(before)).find()) {
+                    slots.add(new ParamSlot(m.group(1).toLowerCase(), Role.BETWEEN_LOW));
+                } else if ((m = INCREMENT_P.matcher(before)).find()) {
+                    slots.add(new ParamSlot(m.group(1).toLowerCase(), Role.INCREMENT));
+                } else if ((m = COMPARE_P.matcher(before)).find()) {
+                    slots.add(new ParamSlot(m.group(1).toLowerCase(), Role.COMPARE));
+                } else if (insertIdx < insertCols.size()) {
+                    slots.add(new ParamSlot(insertCols.get(insertIdx++), Role.INSERT_VALUE));
+                } else {
+                    slots.add(new ParamSlot(null, Role.UNKNOWN));
+                }
+            }
+        }
+        while (slots.size() < expected) slots.add(new ParamSlot(null, Role.UNKNOWN));
+        return slots;
     }
 
     /**
@@ -209,6 +385,7 @@ public class QueryExecutor {
 
     private String captureExplainPlan(Connection conn, String sql, List<Object> params) {
         try (PreparedStatement ps = conn.prepareStatement(adapter.buildExplainAnalyze(sql))) {
+            ps.setQueryTimeout(timeoutSeconds());
             for (int i = 0; i < params.size(); i++) {
                 ps.setObject(i + 1, params.get(i));
             }

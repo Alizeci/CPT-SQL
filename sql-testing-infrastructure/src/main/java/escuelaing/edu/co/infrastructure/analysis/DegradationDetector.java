@@ -86,7 +86,21 @@ public class DegradationDetector {
      */
     public DegradationReport detect(BenchmarkResult result) {
         Map<String, QueryEntry> registry = queryRegistry.getRegistry();
-        Map<String, BenchmarkResult.QueryResult> baseline = baselineManager.load();
+        // Invariant (TG §4.5.4): only compare against a baseline measured under the same
+        // TestProfile, mirror volume and load-profile inputs. Otherwise skip the
+        // baseline-relative criteria and evaluate the contract criteria only.
+        String baselineStatus = baselineManager.compatibilityWith(result);
+        Map<String, BenchmarkResult.QueryResult> baseline;
+        if ("COMPARABLE".equals(baselineStatus)) {
+            baseline = baselineManager.load();
+        } else {
+            baseline = Map.of();
+            if (!"MISSING".equals(baselineStatus)) {
+                LOG.warning("[DegradationDetector] Baseline not comparable — " + baselineStatus
+                        + ". BASELINE_EXCEEDED and PLAN_CHANGED skipped; regenerate the baseline "
+                        + "(update-baseline workflow) before relying on relative criteria.");
+            }
+        }
 
         List<DegradationReport.Degradation> degradations = new ArrayList<>();
 
@@ -124,6 +138,7 @@ public class DegradationDetector {
                 .commitSha(result.getCommitSha())
                 .hasDegradations(hasDegradations)
                 .degradations(degradations)
+                .baselineStatus(baselineStatus)
                 .build();
     }
 
@@ -162,6 +177,9 @@ public class DegradationDetector {
 
         double slaRiskPct   = current.getSlaRiskPct();
         double thresholdPct = planChangeSlaRiskThresholdPct * 100;
+        // Actual relative increase of the estimated cost (reported in the message;
+        // previously the message printed the tolerance instead of the observed delta).
+        int costIncreasePct = (int) Math.round((current.getPlanCost() / baseCost - 1.0) * 100);
 
         String baselineNode = adapter.parsePlanRootNode(baselineResult.getExecutionPlanText());
         String currentNode  = adapter.parsePlanRootNode(current.getExecutionPlanText());
@@ -176,13 +194,13 @@ public class DegradationDetector {
                             "[%s] plan changed: '%s' → '%s' (cost %.2f → %.2f, +%d%%); " +
                             "allowPlanChange=false (slaRisk=%.0f%% >= %.0f%% threshold)",
                             queryId, baselineNode, currentNode,
-                            baseCost, current.getPlanCost(), (int)(planCostTolerancePct * 100),
+                            baseCost, current.getPlanCost(), costIncreasePct,
                             slaRiskPct, thresholdPct)
                     : String.format(
                             "[%s] plan cost=%.2f exceeds baseline=%.2f (+%d%%); " +
                             "allowPlanChange=false (slaRisk=%.0f%% >= %.0f%% threshold)",
                             queryId, current.getPlanCost(), baseCost,
-                            (int)(planCostTolerancePct * 100), slaRiskPct, thresholdPct);
+                            costIncreasePct, slaRiskPct, thresholdPct);
 
             degradations.add(DegradationReport.Degradation.builder()
                     .queryId(queryId)
@@ -200,12 +218,12 @@ public class DegradationDetector {
                             "[%s] plan changed: '%s' → '%s' (cost %.2f → %.2f, +%d%%) — " +
                             "warning only (p95=%.0f ms is %.0f%% of SLA; nightly will confirm at scale)",
                             queryId, baselineNode, currentNode,
-                            baseCost, current.getPlanCost(), (int)(planCostTolerancePct * 100),
+                            baseCost, current.getPlanCost(), costIncreasePct,
                             current.getP95Ms(), slaRiskPct)
                     : String.format(
                             "[%s] plan cost=%.2f increased +%d%% vs baseline — " +
                             "warning only (p95=%.0f ms is %.0f%% of SLA; nightly will confirm at scale)",
-                            queryId, current.getPlanCost(), (int)(planCostTolerancePct * 100),
+                            queryId, current.getPlanCost(), costIncreasePct,
                             current.getP95Ms(), slaRiskPct);
 
             degradations.add(DegradationReport.Degradation.builder()

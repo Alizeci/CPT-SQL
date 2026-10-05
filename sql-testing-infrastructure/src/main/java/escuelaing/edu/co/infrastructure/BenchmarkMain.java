@@ -130,6 +130,7 @@ public class BenchmarkMain {
 
             // --- Degradation detection vs baseline.json ---
             DegradationReport report = detector.detect(result);
+            System.out.println("[BenchmarkMain] Baseline: " + report.getBaselineStatus());
 
             // --- Classify degradations: blocking (exit 1) vs warnings (exit 0) ---
             List<DegradationReport.Degradation> blocking = report.getDegradations().stream()

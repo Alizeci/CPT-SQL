@@ -55,6 +55,16 @@ public class BenchmarkResult {
     /** Peak throughput reached during the benchmark, in TPS. */
     private double peakThroughputAchieved;
 
+    /** Synthetic rows per table of the mirror database used in this run. */
+    private long rowsPerTable;
+
+    /**
+     * SHA-256 of the load-profile inputs that determine the mirror data
+     * (the DP release, or the legacy sanitized rows). Two runs are only
+     * comparable when they were generated from the same inputs.
+     */
+    private String loadProfileFingerprint;
+
     // -------------------------------------------------------------------------
 
     public enum Verdict { PASS, FAIL }

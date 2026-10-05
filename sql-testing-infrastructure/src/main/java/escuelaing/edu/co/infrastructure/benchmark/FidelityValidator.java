@@ -1,5 +1,6 @@
 package escuelaing.edu.co.infrastructure.benchmark;
 
+import escuelaing.edu.co.domain.model.DpRelease;
 import escuelaing.edu.co.domain.model.LoadProfile;
 import escuelaing.edu.co.domain.model.validation.CardinalityFidelity;
 import escuelaing.edu.co.domain.model.validation.DataQuality;
@@ -47,6 +48,10 @@ public class FidelityValidator {
     @Value("${loadtest.fidelity.validationRuns:50}")
     private int validationRuns = 50;
 
+    /** Production p95 below which a query is excluded from the latency aggregate (default 10 ms). */
+    @Value("${loadtest.fidelity.latencyFloorMs:10}")
+    private long latencyFloorMs = 10;
+
     @Value("${loadtest.capture.rowsPerTable:0}")
     private long captureRowsPerTable;
 
@@ -80,7 +85,7 @@ public class FidelityValidator {
             // Layer A adds 2 more populates internally for CRC reproducibility
             DataQuality dataQuality = validateDataQuality(conn, profile);
 
-            boolean dataOk   = "GUARANTEED".equals(dataQuality.getStatus());
+            boolean dataOk   = "REPRODUCIBLE".equals(dataQuality.getStatus());
             boolean mirrorOk = !mirrorAccuracy.isApplicable()
                     || "PASS".equals(mirrorAccuracy.getStatus());
             String overallStatus = (dataOk && mirrorOk) ? "PASS" : "FAIL";
@@ -106,15 +111,27 @@ public class FidelityValidator {
     public DataQuality validateDataQuality(Connection conn,
                                            LoadProfile profile) throws SQLException {
         ReproducibilityCheck reproducibility = validateReproducibility(conn, profile);
-        String status = reproducibility.isByteIdentical() ? "GUARANTEED" : "FAIL";
+        // "REPRODUCIBLE" only certifies byte-identical generation; the privacy mode is
+        // reported separately and is never inferred from reproducibility.
+        String status = reproducibility.isByteIdentical() ? "REPRODUCIBLE" : "FAIL";
+        DpRelease release = profile != null ? profile.getDpRelease() : null;
+        boolean dp = release != null;
 
         return DataQuality.builder()
-                .epsilonFt(SyntheticDataGenerator.EPSILON_FT)
-                .epsilonUii(SyntheticDataGenerator.EPSILON_UII)
-                .epsilonTotal(SyntheticDataGenerator.EPSILON_TOTAL)
-                .delta(1e-6)
-                .featureMechanism("Gaussian Copula Kendall")
-                .identifierMechanism("second-order histogram + pseudonymization")
+                .privacyMode(dataGenerator.getLastPrivacyMode())
+                .epsilonNumeric(dp ? release.getEpsilonNumeric() : 0.0)
+                .epsilonCategorical(dp ? release.getEpsilonCategorical() : 0.0)
+                .epsilonTotal(dp ? release.getEpsilonNumeric() + release.getEpsilonCategorical() : 0.0)
+                .delta(dp ? release.getDelta() : 0.0)
+                .dpSourceRows(dp ? release.getSourceRows() : 0L)
+                .dpReleasedColumns(dp && release.getNumeric() != null
+                        ? new java.util.ArrayList<>(release.getNumeric().keySet()) : java.util.List.of())
+                .dpSuppressedColumns(dp && release.getSuppressedColumns() != null
+                        ? release.getSuppressedColumns() : java.util.List.of())
+                .realRowsSeeded(!dp && dataGenerator.isSeedRealRows())
+                .featureMechanism(dp ? release.getMechanism()
+                        : "none (legacy profile: statistics computed from raw sanitized rows)")
+                .identifierMechanism("synthetic pseudonyms / references to synthetic parent rows (no production identifiers)")
                 .totalRowsGenerated(dataGenerator.getLastRowsGenerated())
                 .schemaCoverage("100% (" + dataGenerator.getLastTablesPopulated() + " tables)")
                 .reproducibility(reproducibility)
@@ -149,19 +166,23 @@ public class FidelityValidator {
         // returns synthetic strings that never match real category values, retrieving 0 rows
         // and reporting unrepresentative sub-millisecond latencies.
         queryExecutor.setStringPool(dataGenerator.buildStringPool(profile));
-
+        queryExecutor.setParameterModel(dataGenerator.getLastNumericStats(),
+                                        dataGenerator.getLastColumnPools());
+        queryExecutor.reseed(dataGenerator.getSeed());
         Map<String, LatencyFidelity>     latency     = validateLatencyFidelity(conn, profile);
         Map<String, CardinalityFidelity> cardinality = validateCardinalityFidelity(conn, profile);
 
         boolean latencyPass = passRate(latency.values().stream()
+                .filter(l -> !l.isExcluded())
                 .map(LatencyFidelity::isPass).toList()) >= 0.90;
         boolean cardinalityPass = cardinality.isEmpty() || passRate(cardinality.values().stream()
                 .map(CardinalityFidelity::isPass).toList()) >= 0.90;
 
         FidelitySummary latencySummary = FidelitySummary.builder()
-                .queriesTested(latency.size())
-                .queriesPassed((int) latency.values().stream().filter(LatencyFidelity::isPass).count())
-                .meanErrorPct(latency.values().stream()
+                .queriesTested((int) latency.values().stream().filter(l -> !l.isExcluded()).count())
+                .queriesPassed((int) latency.values().stream()
+                        .filter(l -> !l.isExcluded() && l.isPass()).count())
+                .meanErrorPct(latency.values().stream().filter(l -> !l.isExcluded())
                         .mapToDouble(LatencyFidelity::getErrorPct).average().orElse(0.0))
                 .build();
 
@@ -210,10 +231,13 @@ public class FidelityValidator {
 
             double errorPct = p95Real > 0 ? Math.abs(p95Syn - p95Real) * 100.0 / p95Real : 0.0;
             boolean pass    = errorPct < SyntheticDataGenerator.LATENCY_ERROR_THRESHOLD_PCT;
-
+            // Queries whose production p95 is below the floor are reported but excluded
+            // from the aggregate: relative error is not meaningful at sub-10 ms scale.
+            boolean excluded = p95Real < latencyFloorMs;
             results.put(qid, LatencyFidelity.builder()
                     .queryId(qid).p95RealMs(p95Real).p95SyntheticMs(p95Syn)
-                    .errorPct(errorPct).pass(pass).build());
+                    .errorPct(errorPct).pass(pass).excluded(excluded)
+                    .sampleCountReal(stats.getSampleCount()).build());
 
             LOG.info(String.format("[Validation] Latency %s: p95_real=%d ms, p95_syn=%d ms, error=%.1f%% → %s",
                     qid, p95Real, p95Syn, errorPct, pass ? "PASS" : "FAIL"));
@@ -311,6 +335,9 @@ public class FidelityValidator {
             conn.setAutoCommit(false);
             sp = conn.setSavepoint();
             try (PreparedStatement ps = conn.prepareStatement(sql)) {
+                // Bind synthetic parameters: executing a statement with unbound
+                // placeholders fails and would be counted as 0 rows affected.
+                queryExecutor.bindParameters(ps, sql);
                 long count = ps.executeUpdate();
                 conn.rollback(sp);
                 return count;
