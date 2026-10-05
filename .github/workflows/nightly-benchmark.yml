@@ -21,6 +21,9 @@ on:
 jobs:
   nightly:
     runs-on: self-hosted
+    # Observed execution ~15–20 min (2M rows, profile normal). Explicit limit instead of the
+    # 6 h self-hosted default, so a stuck run does not block the runner overnight.
+    timeout-minutes: 60
 
     steps:
       - uses: actions/checkout@v4

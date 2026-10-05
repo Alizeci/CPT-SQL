@@ -26,6 +26,8 @@ on:
 jobs:
   update-baseline:
     runs-on: self-hosted
+    # Same profile and volume as the PR gate (light, 400k rows).
+    timeout-minutes: 15
 
     steps:
       - uses: actions/checkout@v4
