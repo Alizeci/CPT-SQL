@@ -714,10 +714,16 @@ public class SyntheticDataGenerator {
                              Map<String, String> fkColumns,
                              Map<String, List<String>> columnStringPool,
                              Map<String, double[]> checkNumericBounds) throws SQLException {
+        // Columns with a DEFAULT are left to the database unless we have a model for them.
+        // A released numeric model counts as a model: without this, columns such as
+        // stock_quantity (DEFAULT 0) or total_amount (DEFAULT 0) were silently filled with
+        // their default in every row, ignoring the DP release.
         List<ColumnMeta> insertable = cols.stream()
                 .filter(c -> c.defaultValue == null || c.defaultValue.isEmpty()
                         || columnStringPool.containsKey(c.name.toLowerCase())
-                        || checkNumericBounds.containsKey(c.name.toLowerCase()))
+                        || checkNumericBounds.containsKey(c.name.toLowerCase())
+                        || dpStats.containsKey(c.name)
+                        || dpStats.containsKey(c.name.toLowerCase()))
                 .toList();
         if (insertable.isEmpty()) return;
 
