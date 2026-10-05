@@ -26,6 +26,13 @@ public class LoadProfile {
     private long totalSamples;
     private Map<String, QueryStats> queries;
 
+    /**
+     * Differentially-private release of the sanitized business columns.
+     * When present, it replaces {@code sanitizedRealData} as the only source of
+     * production-derived values for synthetic data generation.
+     */
+    private DpRelease dpRelease;
+
     @Data
     @Builder
     @NoArgsConstructor

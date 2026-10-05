@@ -1,5 +1,6 @@
 package escuelaing.edu.co.infrastructure.capture;
 
+import escuelaing.edu.co.domain.model.DpRelease;
 import escuelaing.edu.co.domain.model.LoadProfile;
 import escuelaing.edu.co.domain.model.TransactionRecord;
 import org.springframework.stereotype.Component;
@@ -23,8 +24,13 @@ import java.util.stream.Collectors;
  *   <li><b>minMs</b>, <b>maxMs</b></li>
  *   <li><b>callsPerMinute</b> — estimated over the observation window</li>
  *   <li><b>capturedSql</b> — first non-blank SQL found in the sample set</li>
- *   <li><b>sanitizedRealData</b> — up to 10 % of samples with sanitized row data</li>
+ *   <li><b>sanitizedRealData</b> — only when {@code CPT_DP_KEEP_SANITIZED_ROWS=true}
+ *       (debugging); {@code null} by default</li>
  * </ul>
+ *
+ * <p>Sanitized business values never leave the capture step in raw form: all sanitized
+ * rows are aggregated into a single {@link escuelaing.edu.co.domain.model.DpRelease}
+ * (see {@link DpReleaseBuilder}) and then discarded.</p>
  *
  * <p>The observation window is the span between the earliest and latest
  * {@code timestamp} in the sample set.</p>
@@ -33,9 +39,22 @@ import java.util.stream.Collectors;
 public class LoadProfileBuilder {
 
     private final MetricsBuffer metricsBuffer;
+    private DpConfig dpConfig;
 
+    @org.springframework.beans.factory.annotation.Autowired
     public LoadProfileBuilder(MetricsBuffer metricsBuffer) {
+        this(metricsBuffer, DpConfig.fromEnv());
+    }
+
+    public LoadProfileBuilder(MetricsBuffer metricsBuffer, DpConfig dpConfig) {
         this.metricsBuffer = metricsBuffer;
+        this.dpConfig      = dpConfig;
+    }
+
+    /** Overrides the DP configuration (defaults to {@link DpConfig#fromEnv()}). */
+    public LoadProfileBuilder withDpConfig(DpConfig dpConfig) {
+        this.dpConfig = dpConfig;
+        return this;
     }
 
     /**
@@ -87,10 +106,19 @@ public class LoadProfileBuilder {
             statsMap.put(entry.getKey(), computeStats(entry.getKey(), entry.getValue(), windowMins));
         }
 
+        List<Map<String, Object>> allSanitized = records.stream()
+                .map(TransactionRecord::getSanitizedData)
+                .filter(d -> d != null && !d.isEmpty())
+                .collect(Collectors.toList());
+        DpRelease dpRelease = allSanitized.isEmpty()
+                ? null
+                : new DpReleaseBuilder(dpConfig).build(allSanitized);
+
         return LoadProfile.builder()
                 .generatedAt(Instant.now())
                 .totalSamples(records.size())
                 .queries(Collections.unmodifiableMap(statsMap))
+                .dpRelease(dpRelease)
                 .build();
     }
 
@@ -126,12 +154,14 @@ public class LoadProfileBuilder {
                 .average()
                 .orElse(0.0);
 
-        int maxRealRows = Math.max(1, (int) Math.ceil(n * 0.10));
-        List<Map<String, Object>> sanitizedRealData = samples.stream()
-                .filter(r -> r.getSanitizedData() != null && !r.getSanitizedData().isEmpty())
-                .limit(maxRealRows)
-                .map(TransactionRecord::getSanitizedData)
-                .collect(Collectors.toList());
+        // Raw sanitized rows are kept only on explicit request (debugging).
+        // By default they are summarised into the DP release and discarded.
+        List<Map<String, Object>> sanitizedRealData = !dpConfig.keepSanitizedRows()
+                ? List.of()
+                : samples.stream()
+                        .filter(r -> r.getSanitizedData() != null && !r.getSanitizedData().isEmpty())
+                        .map(TransactionRecord::getSanitizedData)
+                        .collect(Collectors.toList());
 
         return LoadProfile.QueryStats.builder()
                 .queryId(queryId)

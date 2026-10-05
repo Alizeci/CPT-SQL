@@ -19,4 +19,8 @@ public class LatencyFidelity {
     private double errorPct;
 
     private boolean pass;
+    /** True when p95RealMs is below the latency floor; reported but not aggregated. */
+    private boolean excluded;
+    /** Number of production samples behind p95RealMs. */
+    private long sampleCountReal;
 }

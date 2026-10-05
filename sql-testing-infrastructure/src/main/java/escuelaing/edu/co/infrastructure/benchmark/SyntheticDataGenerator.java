@@ -1,5 +1,6 @@
 package escuelaing.edu.co.infrastructure.benchmark;
 
+import escuelaing.edu.co.domain.model.DpRelease;
 import escuelaing.edu.co.domain.model.LoadProfile;
 import jakarta.annotation.PostConstruct;
 import org.springframework.beans.factory.annotation.Value;
@@ -31,24 +32,23 @@ import java.util.stream.Collectors;
 import java.util.zip.CRC32;
 
 /**
- * Populates the mirror database with differentially-private synthetic data.
+ * Populates the mirror database with synthetic data derived only from the
+ * differentially-private release produced in Phase 2 ({@link DpRelease}).
  *
- * <p>Columns are split into two categories with independent privacy budgets:
- * <b>Feature columns</b> (numeric business values such as price or rating) receive
- * Gaussian noise calibrated from production statistics, preserving the distributions
- * that affect query selectivity. <b>UII columns</b> (any {@code *_id}, {@code user_id},
- * {@code customer_id}) are replaced by pseudonyms in the exclusive range [10001, 99999]
- * so real identifiers never enter the mirror database.</p>
+ * <p><b>What reaches the mirror:</b> numeric business columns are sampled from
+ * N(mean, std) using the released (noisy) mean and standard deviation, clamped to the
+ * declared bounds; categorical columns are sampled from the released noisy histogram;
+ * identifier columns receive synthetic pseudonyms or references to synthetic parent rows.
+ * Because the generator only post-processes the release, it consumes no additional
+ * privacy budget, and no captured row or identifier is ever inserted.</p>
  *
- * <p>Because Feature and UII mechanisms operate on disjoint column sets, the total
- * privacy budget is simply the sum: ε_total = ε_ft + ε_uii = 1.0. The statistics
- * used for calibration come from {@code sanitizedRealData} captured at sampling
- * rate {@code q} (default 0.1), so the effective budget with respect to the full
- * production dataset is ε_eff = q × ε_ft = 0.06.</p>
+ * <p><b>Legacy profiles</b> (without {@code dpRelease}) fall back to statistics computed
+ * directly from {@code sanitizedRealData}; that path offers no formal guarantee and is
+ * reported as {@code LEGACY_UNPROTECTED} in the validation report. Inserting raw
+ * sanitized rows requires the explicit opt-in {@code loadtest.synthetic.seedRealRows=true}.</p>
  *
- * <p>Real sanitized rows are seeded first (10 %), then synthetic rows fill the
- * remaining volume (90 %). All random decisions use a single seeded
- * {@link java.util.Random}, making two runs with the same seed byte-identical.</p>
+ * <p>Generation uses a single seeded {@link java.util.Random}, so two runs with the same
+ * seed and the same release are byte-identical.</p>
  *
  * <p>Tables are discovered via {@code INFORMATION_SCHEMA.tables} — the generator
  * is schema-agnostic and works with any PostgreSQL schema without modification.
@@ -56,14 +56,10 @@ import java.util.zip.CRC32;
  * to sort tables topologically (parents before children) and to generate FK column
  * values that reference existing rows in the parent table.</p>
  *
- * <p>Each row is inserted individually with its own savepoint so that a single
- * constraint violation does not discard the entire batch for that table.</p>
- *
  * <pre>
  * loadtest.synthetic.rowsPerTable=500
- * loadtest.synthetic.batchSize=200
  * loadtest.synthetic.seed=42
- * loadtest.synthetic.subsamplingRate=0.1   # must match SamplingFilter rate in Phase 2
+ * loadtest.synthetic.seedRealRows=false   # opt-in, debugging only
  * </pre>
  */
 @Component
@@ -82,16 +78,18 @@ public class SyntheticDataGenerator {
 
     private static final Logger LOG = Logger.getLogger(SyntheticDataGenerator.class.getName());
 
-    /** Privacy budget for Feature columns. Noise = sensitivity / ε_ft. */
-    static final double EPSILON_FT  = 0.6;
+    /** Privacy mode reported when the profile carries a {@link DpRelease}. */
+    public static final String MODE_DP_RELEASE = "DP_RELEASE";
 
-    /** Privacy budget for UII columns (identifiers replaced by pseudonyms). */
-    static final double EPSILON_UII = 0.4;
+    /** Privacy mode reported for legacy profiles that only carry raw sanitized rows. */
+    public static final String MODE_LEGACY = "LEGACY_UNPROTECTED";
 
-    /** Total budget = ε_ft + ε_uii; valid because Feature and UII column sets are disjoint. */
-    static final double EPSILON_TOTAL = EPSILON_FT + EPSILON_UII; // 1.0
-
-    /** Pseudonym range for UII columns — does not overlap with production IDs (1–10000). */
+    /**
+     * Pseudonym range for identifier columns without a resolvable parent table.
+     * Pseudonyms are random and carry no production information; they may coincide
+     * numerically with production identifiers, which is harmless because no
+     * production row is ever copied.
+     */
     private static final int UII_MIN = 10_001;
     private static final int UII_MAX = 99_999;
 
@@ -110,14 +108,6 @@ public class SyntheticDataGenerator {
     @Value("${loadtest.synthetic.seed:42}")
     private long seed;
 
-    /**
-     * Fraction of production queries sampled by Phase 2 (default 0.1 = 10 %).
-     * Must match {@code loadtest.capture.samplingRate}.
-     * Used to compute ε_eff = subsamplingRate × ε_ft — the effective privacy budget
-     * with respect to the full production dataset.
-     */
-    @Value("${loadtest.synthetic.subsamplingRate:0.1}")
-    private double subsamplingRate;
 
     /**
      * Comma-separated list of column names to exclude from the string parameter pool.
@@ -126,6 +116,22 @@ public class SyntheticDataGenerator {
      */
     @Value("${loadtest.synthetic.sensitiveColumns:}")
     private String sensitiveColumnsRaw;
+
+    /** Opt-in (debugging only): inserts raw sanitized rows from legacy profiles into the mirror. */
+    @Value("${loadtest.synthetic.seedRealRows:false}")
+    private boolean seedRealRows = false;
+
+    /** Privacy mode of the last {@link #populate} call. */
+    private String lastPrivacyMode = MODE_LEGACY;
+
+    /** DP release used by the last {@link #populate} call (null for legacy profiles). */
+    private DpRelease lastDpRelease;
+
+    /** Numeric column statistics used by the last populate: col → [mean, std, lower, upper]. */
+    private Map<String, double[]> lastNumericStats = Collections.emptyMap();
+
+    /** Categorical pools used by the last populate (values repeated by released count). */
+    private Map<String, List<String>> lastColumnPools = Collections.emptyMap();
 
     private Random rng = new Random(42);
 
@@ -155,23 +161,25 @@ public class SyntheticDataGenerator {
         this.rng  = new Random(seed);
     }
 
-    /**
-     * Returns the effective privacy budget after applying privacy amplification by subsampling.
-     *
-     * <p>The Phase 2 SamplingFilter captures only a {@code subsamplingRate} fraction
-     * of production queries. Because the Gaussian mechanism is applied to this
-     * q-subsample, the formal guarantee tightens from ε_ft to q·ε_ft with respect
-     * to the full production dataset — at no additional noise cost.</p>
-     *
-     * @return effective ε for Feature columns = subsamplingRate × EPSILON_FT
-     */
-    public double getEffectiveEpsilon() {
-        return subsamplingRate * EPSILON_FT;
-    }
 
     public long getLastRowsGenerated()  { return lastRowsGenerated; }
     public int  getLastTablesPopulated() { return lastTablesPopulated; }
     public int  getRowsPerTable()        { return rowsPerTable; }
+
+    /** {@value #MODE_DP_RELEASE} or {@value #MODE_LEGACY} for the last populate. */
+    public String getLastPrivacyMode()   { return lastPrivacyMode; }
+
+    /** DP release used by the last populate, or {@code null} for legacy profiles. */
+    public DpRelease getLastDpRelease()  { return lastDpRelease; }
+
+    /** Numeric statistics (col → [mean, std, lower, upper]) used by the last populate. */
+    public Map<String, double[]> getLastNumericStats() { return lastNumericStats; }
+
+    /** Categorical value pools used by the last populate. */
+    public Map<String, List<String>> getLastColumnPools() { return lastColumnPools; }
+
+    /** Whether raw sanitized rows may be inserted (opt-in). */
+    public boolean isSeedRealRows()      { return seedRealRows; }
 
     // Column classification: Feature vs UII
 
@@ -277,8 +285,21 @@ public class SyntheticDataGenerator {
 
             truncateTables(conn, sortedTables);
 
-            Map<String, double[]> dpStats = buildDpStats(profile);
-            Map<String, List<String>> columnStringPool = buildColumnStringPool(profile);
+            boolean hasRelease = profile != null && profile.getDpRelease() != null;
+            lastDpRelease   = hasRelease ? profile.getDpRelease() : null;
+            lastPrivacyMode = hasRelease ? MODE_DP_RELEASE : MODE_LEGACY;
+            if (!hasRelease) {
+                LOG.warning("[SyntheticData] Profile has no dpRelease — falling back to legacy statistics "
+                        + "computed from sanitizedRealData (no formal privacy guarantee).");
+            }
+            Map<String, double[]> dpStats = hasRelease
+                    ? numericStatsFromRelease(profile.getDpRelease())
+                    : buildDpStats(profile);
+            Map<String, List<String>> columnStringPool = hasRelease
+                    ? poolsFromRelease(profile.getDpRelease())
+                    : buildColumnStringPool(profile);
+            lastNumericStats = dpStats;
+            lastColumnPools  = columnStringPool;
 
             // Discover CHECK constraints to fill any gaps left by the production string pool.
             // Enum-like columns (e.g. status, tier) whose values never appear in query SELECT
@@ -289,7 +310,10 @@ public class SyntheticDataGenerator {
             checks.enumValues().forEach(columnStringPool::putIfAbsent);
             Map<String, double[]> checkNumericBounds = checks.numericBounds();
 
-            insertRealSanitizedData(conn, profile, sortedTables, dpStats, fkConstraints, columnStringPool, checkNumericBounds);
+            if (seedRealRows && !hasRelease) {
+                LOG.warning("[SyntheticData] seedRealRows=true — inserting raw sanitized rows (debugging only).");
+                insertRealSanitizedData(conn, profile, sortedTables, dpStats, fkConstraints, columnStringPool, checkNumericBounds);
+            }
 
             for (String table : sortedTables) {
                 List<ColumnMeta> cols = describeTable(conn, table);
@@ -731,7 +755,8 @@ public class SyntheticDataGenerator {
 
         return switch (col.dataType.toLowerCase()) {
             case "integer", "int", "int4", "int8", "bigint", "smallint" ->
-                    String.valueOf((int) clamp(gaussianNoise(mean, sigma), 1, 10_000));
+                    String.valueOf((int) Math.round(clamp(gaussianNoise(mean, sigma),
+                            stats != null ? Math.max(minVal, 0) : 1, stats != null ? maxVal : 10_000)));
             case "numeric", "decimal", "real", "double precision", "float8" ->
                     String.valueOf(Math.round(clamp(gaussianNoise(mean, sigma), minVal, maxVal) * 100) / 100.0);
             case "boolean", "bool" ->
@@ -794,7 +819,8 @@ public class SyntheticDataGenerator {
                 : (stats != null && stats.length > 3 ? stats[3] : 999_999.99);
         switch (col.dataType.toLowerCase()) {
             case "integer", "int", "int4", "int8", "bigint", "smallint" ->
-                    ps.setInt(idx, (int) clamp(gaussianNoise(mean, sigma), 1, 10_000));
+                    ps.setInt(idx, (int) Math.round(clamp(gaussianNoise(mean, sigma),
+                            stats != null ? Math.max(minVal, 0) : 1, stats != null ? maxVal : 10_000)));
             case "numeric", "decimal", "real", "double precision", "float8" ->
                     ps.setBigDecimal(idx, BigDecimal.valueOf(
                             Math.round(clamp(gaussianNoise(mean, sigma), minVal, maxVal) * 100) / 100.0));
@@ -872,6 +898,11 @@ public class SyntheticDataGenerator {
      * @return immutable list of safe string values; empty if no suitable values found
      */
     public List<String> buildStringPool(LoadProfile profile) {
+        if (profile != null && profile.getDpRelease() != null) {
+            List<String> flat = new ArrayList<>();
+            poolsFromRelease(profile.getDpRelease()).values().forEach(flat::addAll);
+            return Collections.unmodifiableList(flat);
+        }
         if (profile == null || profile.getQueries() == null) return Collections.emptyList();
 
         Set<String> sensitive = parseSensitiveColumns();
@@ -962,27 +993,16 @@ public class SyntheticDataGenerator {
                 .collect(Collectors.toSet());
     }
 
-    // DP calibration from profile statistics
+    // Legacy statistics (profiles without dpRelease)
 
     /**
-     * Extracts per-column DP-calibrated statistics from sanitizedRealData in the profile.
+     * LEGACY: computes per-column statistics directly from {@code sanitizedRealData}.
      *
-     * <p>Collects numeric values by column name across all queries, computes mean and
-     * standard deviation, then applies the Gaussian mechanism with ε={@link #EPSILON_FT}.</p>
+     * <p>Used only for profiles generated before the DP release existed. No noise is
+     * applied and the observed min/max are used as clamp bounds, so this path offers
+     * no formal privacy guarantee; it is reported as {@value #MODE_LEGACY}.</p>
      *
-     * <p>The sanitizedRealData was collected at {@code subsamplingRate} (default 10 %).
-     * Because the mechanism is applied to a q-subsample of the full population,
-     * the formal guarantee with respect to the full production dataset is
-     * ε_eff = q × ε_ft (logged below), not ε_ft — at no additional noise cost.</p>
-     *
-     * <p>The returned array per column has four elements:
-     * {@code [dpMean, dpStd, observedMin, observedMax]}.
-     * The observed min/max are used as clamp bounds in {@link #setColumnValue} to keep
-     * generated numeric values within any range CHECK constraints present in the schema,
-     * without requiring schema-specific configuration.</p>
-     *
-     * @return map of column name → [dpMean, dpStd, observedMin, observedMax];
-     *         empty if no samples available
+     * @return map of column name → [mean, std, observedMin, observedMax]
      */
     Map<String, double[]> buildDpStats(LoadProfile profile) {
         if (profile == null || profile.getQueries() == null) return Collections.emptyMap();
@@ -1001,10 +1021,8 @@ public class SyntheticDataGenerator {
             }
         }
 
-        // Privacy amplification by subsampling: ε_eff = q × ε_ft.
-        // The noise level stays the same; the formal guarantee tightens because the
-        // mechanism was applied to a q-subsample of the full production dataset.
-        double effectiveEpsilon = subsamplingRate * EPSILON_FT;
+        // LEGACY path (profiles without dpRelease): statistics computed directly from raw
+        // sanitized rows. Kept for backward compatibility only — offers no formal guarantee.
 
         Map<String, double[]> dpStats = new HashMap<>();
         for (Map.Entry<String, List<Double>> entry : columnValues.entrySet()) {
@@ -1012,9 +1030,7 @@ public class SyntheticDataGenerator {
             if (values.size() < 2) continue;
             double m = mean(values);
             double s = std(values, m);
-            int n = values.size();
-            double sensitivity = Math.max(m, 1.0) / n;
-            double dpMean = clamp(gaussianNoise(m, sensitivity), 0.0, m * 3 + 1);
+            double dpMean = m;
             double dpStd  = Math.max(0.1, s);
             double obsMin = values.stream().mapToDouble(Double::doubleValue).min().orElse(0.0);
             double obsMax = values.stream().mapToDouble(Double::doubleValue).max().orElse(m * 3 + 1);
@@ -1022,10 +1038,7 @@ public class SyntheticDataGenerator {
         }
 
         if (!dpStats.isEmpty()) {
-            LOG.info(String.format(
-                    "[SyntheticData] DP stats built for columns %s " +
-                    "(ε_ft=%.2f, subsamplingRate=%.2f → ε_eff=%.4f w.r.t. full dataset)",
-                    dpStats.keySet(), EPSILON_FT, subsamplingRate, effectiveEpsilon));
+            LOG.warning("[SyntheticData] LEGACY statistics (no DP) built for columns " + dpStats.keySet());
         }
         return dpStats;
     }
@@ -1045,12 +1058,48 @@ public class SyntheticDataGenerator {
     }
 
     /**
-     * Applies the Gaussian mechanism with budget ε_ft to a Feature column.
-     * Sensitivity is scaled by (1 / ε_ft): more noise at higher privacy (lower ε),
-     * less noise at lower privacy (higher ε).
+     * Samples a synthetic value from N(base, sigma²) using the seeded generator.
+     *
+     * <p>This is <em>data generation</em> (post-processing of already released
+     * statistics), not a privacy mechanism: the privacy noise is applied once, at
+     * capture time, by {@link escuelaing.edu.co.infrastructure.capture.DpReleaseBuilder}.</p>
      */
     double gaussianNoise(double base, double sigma) {
-        return base + rng.nextGaussian() * (sigma / EPSILON_FT);
+        return base + rng.nextGaussian() * sigma;
+    }
+
+    // -------------------------------------------------------------------------
+    // DP release → generator inputs (post-processing, no extra budget)
+    // -------------------------------------------------------------------------
+
+    /** Converts released numeric columns into {@code col → [mean, std, lower, upper]}. */
+    static Map<String, double[]> numericStatsFromRelease(DpRelease release) {
+        Map<String, double[]> out = new HashMap<>();
+        if (release == null || release.getNumeric() == null) return out;
+        release.getNumeric().forEach((col, c) ->
+                out.put(col, new double[]{c.getMean(), c.getStd(), c.getLower(), c.getUpper()}));
+        return out;
+    }
+
+    /**
+     * Converts released histograms into value pools whose frequencies are proportional
+     * to the released counts (scaled so each pool has at most 1 000 entries).
+     */
+    static Map<String, List<String>> poolsFromRelease(DpRelease release) {
+        Map<String, List<String>> out = new HashMap<>();
+        if (release == null || release.getCategorical() == null) return out;
+        release.getCategorical().forEach((col, counts) -> {
+            double total = counts.values().stream().mapToDouble(Double::doubleValue).sum();
+            if (total <= 0) return;
+            double scale = Math.min(1.0, 1000.0 / total);
+            List<String> pool = new ArrayList<>();
+            counts.forEach((value, count) -> {
+                long reps = Math.max(1, Math.round(count * scale));
+                for (long i = 0; i < reps; i++) pool.add(value);
+            });
+            out.put(col, Collections.unmodifiableList(pool));
+        });
+        return out;
     }
 
     private static final String ALPHANUM =

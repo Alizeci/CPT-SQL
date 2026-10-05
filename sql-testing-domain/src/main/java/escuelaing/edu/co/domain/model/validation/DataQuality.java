@@ -4,23 +4,38 @@ import lombok.Builder;
 import lombok.Data;
 
 /**
- * Algorithmic guarantee from the DPSDG generator (Liu et al. 2024).
- * Covers DP-budget metadata and byte-identical reproducibility.
- * Always evaluated; {@code status} is "GUARANTEED" when {@code reproducibility.byteIdentical == true}.
+ * Data-quality layer of the validation report.
+ *
+ * <p>Reports (a) the privacy mode actually used to generate the mirror and the
+ * parameters of the DP release it was derived from, exactly as recorded in the load
+ * profile, and (b) byte-identical reproducibility of the generator. {@code status} only
+ * certifies reproducibility ("REPRODUCIBLE"); it says nothing about privacy.</p>
  */
 @Data
 @Builder
 public class DataQuality {
 
+    /** "DP_RELEASE" when the mirror was generated from a DP release; "LEGACY_UNPROTECTED" otherwise. */
+    private String privacyMode;
     private double epsilonTotal;
-    private double epsilonFt;
-    private double epsilonUii;
+    /** Budget spent on numeric columns (Gaussian mechanism on clipped moments). */
+    private double epsilonNumeric;
+    /** Budget spent on categorical histograms. */
+    private double epsilonCategorical;
     private double delta;
+    /** Number of sanitized rows summarised by the release. */
+    private long dpSourceRows;
+    /** Numeric columns released (with declared bounds). */
+    private java.util.List<String> dpReleasedColumns;
+    /** Columns observed but suppressed (no declared bounds or below release threshold). */
+    private java.util.List<String> dpSuppressedColumns;
+    /** True only if raw sanitized rows were inserted (legacy opt-in). */
+    private boolean realRowsSeeded;
 
-    /** DP mechanism applied to FEATURE columns (numeric/categorical). */
+    /** Mechanism applied to feature columns, as recorded in the DP release. */
     private String featureMechanism;
 
-    /** DP mechanism applied to IDENTIFIER columns (high-cardinality keys). */
+    /** Treatment of identifier columns. */
     private String identifierMechanism;
 
     private long   totalRowsGenerated;
@@ -28,6 +43,6 @@ public class DataQuality {
 
     private ReproducibilityCheck reproducibility;
 
-    /** "GUARANTEED" when {@code reproducibility.byteIdentical == true}, otherwise "FAIL". */
+    /** "REPRODUCIBLE" when {@code reproducibility.byteIdentical == true}, otherwise "FAIL". */
     private String status;
 }

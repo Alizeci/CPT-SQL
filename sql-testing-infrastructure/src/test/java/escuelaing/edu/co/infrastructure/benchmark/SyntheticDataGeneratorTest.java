@@ -107,25 +107,40 @@ class SyntheticDataGeneratorTest {
     }
 
     @Test
-    @DisplayName("gaussianNoise applies the ε_ft budget as sigma divisor")
-    void gaussianNoise_appliesEpsilonScale() {
-        // With sigma = 0 and any ε, the noise must equal the base exactly
+    @DisplayName("gaussianNoise with sigma = 0 returns the base value (pure post-processing)")
+    void gaussianNoise_zeroSigmaReturnsBase() {
+        // Generation samples N(base, sigma²); privacy noise is applied at capture time
         generator.setSeed(42);
         double result = generator.gaussianNoise(50.0, 0.0);
         assertThat(result).isCloseTo(50.0, within(0.001));
     }
 
     // -------------------------------------------------------------------------
-    // Constantes de privacidad diferencial (SynQB Theorem 4.4)
+    // DP release → generator inputs (post-processing)
     // -------------------------------------------------------------------------
 
     @Test
-    @DisplayName("ε_total = ε_ft + ε_uii = 1.0 by sequential composition")
-    void epsilonTotalEqualsSum() {
-        assertThat(SyntheticDataGenerator.EPSILON_TOTAL)
-                .isCloseTo(SyntheticDataGenerator.EPSILON_FT + SyntheticDataGenerator.EPSILON_UII,
-                        within(1e-9));
-        assertThat(SyntheticDataGenerator.EPSILON_TOTAL).isCloseTo(1.0, within(1e-9));
+    @DisplayName("numericStatsFromRelease maps released moments and declared bounds")
+    void numericStatsFromRelease_mapsReleasedValues() {
+        escuelaing.edu.co.domain.model.DpRelease release = escuelaing.edu.co.domain.model.DpRelease.builder()
+                .numeric(java.util.Map.of("price", escuelaing.edu.co.domain.model.DpRelease.NumericColumn.builder()
+                        .lower(0).upper(600).n(1000).mean(120.5).std(40.0).build()))
+                .categorical(java.util.Map.of())
+                .build();
+        double[] stats = SyntheticDataGenerator.numericStatsFromRelease(release).get("price");
+        assertThat(stats).containsExactly(120.5, 40.0, 0.0, 600.0);
+    }
+
+    @Test
+    @DisplayName("poolsFromRelease reproduces released proportions")
+    void poolsFromRelease_reproducesProportions() {
+        escuelaing.edu.co.domain.model.DpRelease release = escuelaing.edu.co.domain.model.DpRelease.builder()
+                .numeric(java.util.Map.of())
+                .categorical(java.util.Map.of("category", java.util.Map.of("books", 300.0, "home", 100.0)))
+                .build();
+        java.util.List<String> pool = SyntheticDataGenerator.poolsFromRelease(release).get("category");
+        long books = pool.stream().filter("books"::equals).count();
+        assertThat((double) books / pool.size()).isCloseTo(0.75, within(0.01));
     }
 
     // -------------------------------------------------------------------------

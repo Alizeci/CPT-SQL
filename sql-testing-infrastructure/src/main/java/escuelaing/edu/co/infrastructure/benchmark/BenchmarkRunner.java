@@ -118,6 +118,9 @@ public class BenchmarkRunner {
         try (Connection conn = provisioner.openConnection()) {
             dataGenerator.populate(conn, profile);
             queryExecutor.setStringPool(dataGenerator.buildStringPool(profile));
+            queryExecutor.setParameterModel(dataGenerator.getLastNumericStats(),
+                                            dataGenerator.getLastColumnPools());
+            queryExecutor.reseed(dataGenerator.getSeed());
 
             PhaseAccumulator accumulator = new PhaseAccumulator();
             for (TestProfile.Phase phase : testProfile.getPhases()) {
@@ -376,7 +379,41 @@ public class BenchmarkRunner {
                 .overallVerdict(anyFail ? BenchmarkResult.Verdict.FAIL : BenchmarkResult.Verdict.PASS)
                 .throughputTimeSeries(accumulator.throughputSeries)
                 .peakThroughputAchieved(accumulator.peakTps)
+                .rowsPerTable(dataGenerator.getRowsPerTable())
+                .loadProfileFingerprint(fingerprint(profile))
                 .build();
+    }
+
+    /**
+     * SHA-256 over the inputs that determine the synthetic mirror: the DP release
+     * (or, for legacy profiles, the sanitized rows). Captured SQL and latency statistics
+     * are deliberately excluded, so a PR that only changes SQL keeps the same fingerprint.
+     */
+    public static String fingerprint(LoadProfile profile) {
+        if (profile == null) return null;
+        try {
+            com.fasterxml.jackson.databind.ObjectMapper m = new com.fasterxml.jackson.databind.ObjectMapper()
+                    .configure(com.fasterxml.jackson.databind.SerializationFeature.ORDER_MAP_ENTRIES_BY_KEYS, true)
+                    .configure(com.fasterxml.jackson.databind.MapperFeature.SORT_PROPERTIES_ALPHABETICALLY, true);
+            Object basis;
+            if (profile.getDpRelease() != null) {
+                basis = profile.getDpRelease();
+            } else {
+                java.util.Map<String, Object> legacy = new java.util.TreeMap<>();
+                if (profile.getQueries() != null) {
+                    profile.getQueries().forEach((qid, q) -> legacy.put(qid, q.getSanitizedRealData()));
+                }
+                basis = legacy;
+            }
+            byte[] digest = java.security.MessageDigest.getInstance("SHA-256")
+                    .digest(m.writeValueAsBytes(basis));
+            StringBuilder sb = new StringBuilder();
+            for (int i = 0; i < 8; i++) sb.append(String.format("%02x", digest[i]));
+            return sb.toString();
+        } catch (Exception e) {
+            LOG.warning("[BenchmarkRunner] Could not fingerprint load profile: " + e.getMessage());
+            return null;
+        }
     }
 
     private long totalMeasurementMs(TestProfile testProfile) {

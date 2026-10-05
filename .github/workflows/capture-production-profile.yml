@@ -8,6 +8,21 @@ on:
         required: false
         type: number
         default: 180
+      dp-bounds:
+        description: 'Declared clipping bounds for numeric business columns (col:lower:upper,...). Columns without bounds are not released.'
+        required: false
+        type: string
+        default: ''
+      dp-epsilon-numeric:
+        description: 'Privacy budget for numeric columns'
+        required: false
+        type: string
+        default: '0.6'
+      dp-epsilon-categorical:
+        description: 'Privacy budget for categorical columns'
+        required: false
+        type: string
+        default: '0.4'
     secrets:
       DB_URL:
         required: true
@@ -30,6 +45,9 @@ jobs:
       - name: Phase 2 — Capture load profile
         run: SIMULATION_SECS=${{ inputs.simulation-secs }} ./gradlew runSimulator
         env:
+          CPT_DP_BOUNDS: ${{ inputs.dp-bounds }}
+          CPT_DP_EPSILON_NUMERIC: ${{ inputs.dp-epsilon-numeric }}
+          CPT_DP_EPSILON_CATEGORICAL: ${{ inputs.dp-epsilon-categorical }}
           DB_URL: ${{ secrets.DB_URL }}
           DB_USER: ${{ secrets.DB_USER }}
           DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
