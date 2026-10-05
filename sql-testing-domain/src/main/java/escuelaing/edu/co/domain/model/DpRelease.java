@@ -52,6 +52,22 @@ public class DpRelease {
     /** Columns observed but not released (e.g. numeric without declared bounds). */
     private java.util.List<String> suppressedColumns;
 
+    /**
+     * Total budget spent on foreign-key degree releases (split evenly across relations).
+     * Zero when no relation was released.
+     */
+    private double epsilonForeignKey;
+
+    /** δ spent on foreign-key degree releases (split evenly across relations). */
+    private double deltaForeignKey;
+
+    /**
+     * Released shape of each foreign-key relation, keyed {@code child_table.fk_column}.
+     * Captures how child rows concentrate on parent rows (e.g. a few best-selling products
+     * own most order items), which per-column statistics cannot express.
+     */
+    private Map<String, ForeignKeyDegree> foreignKeys;
+
     @Data
     @Builder
     @NoArgsConstructor
@@ -71,5 +87,35 @@ public class DpRelease {
         private double sigmaMean;
         /** Noise scale applied to the second moment. */
         private double sigmaSecondMoment;
+    }
+
+    /**
+     * Differentially-private summary of the degree distribution of one foreign key:
+     * the share of child rows owned by the top {@code q} fraction of parent rows, for a
+     * fixed (data-independent) grid of fractions.
+     *
+     * <p>Neighbouring datasets differ in one child row. Adding or removing a child row
+     * changes exactly one entry of the sorted degree sequence by one (Hay et al., ICDM
+     * 2009), so each cumulative sum at a fixed rank changes by at most one and the vector
+     * of {@code m} cumulative sums has L2 sensitivity {@code √m}. Parent identities are
+     * never released: only the shape of the sorted sequence.</p>
+     */
+    @Data
+    @Builder
+    @NoArgsConstructor
+    @AllArgsConstructor
+    public static class ForeignKeyDegree {
+        private String childTable;
+        private String column;
+        private String parentTable;
+        /** Fixed grid of parent-rank fractions (public), ascending, last = 1.0. */
+        private java.util.List<Double> rankFractions;
+        /**
+         * Released share of child rows owned by the top {@code rankFractions[i]} parents,
+         * after post-processing (monotone, concave, last = 1.0).
+         */
+        private java.util.List<Double> cumulativeShare;
+        /** Noise scale applied to each cumulative count. */
+        private double sigma;
     }
 }

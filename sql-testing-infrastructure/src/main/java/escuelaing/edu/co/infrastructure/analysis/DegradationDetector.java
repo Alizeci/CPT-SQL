@@ -23,7 +23,7 @@ import java.util.logging.Logger;
  *       {@code queries.json} via {@link QueryRegistryLoader}.</li>
  *   <li><b>Historical baseline:</b> p95 stored in {@code baseline.json} by
  *       {@link BaselineManager}. A degradation is flagged when the current p95
- *       exceeds the baseline by more than {@code baselineTolerancePct}
+ *       exceeds the baseline by more than {@code baselineTolerancePct} (and by at least {@code baselineMinDeltaMs})
  *       (10 % by default).</li>
  * </ol>
  *
@@ -47,6 +47,14 @@ public class DegradationDetector {
 
     @Value("${loadtest.detector.baselineTolerancePct:0.10}")
     private double baselineTolerancePct;
+
+    /**
+     * Minimum absolute p95 increase (ms) for {@code BASELINE_EXCEEDED}. Avoids flagging
+     * millisecond-scale queries whose relative change is pure measurement noise
+     * (e.g. 2 ms → 6 ms on a single sample). Same rationale as the fidelity latency floor.
+     */
+    @Value("${loadtest.detector.baselineMinDeltaMs:10}")
+    private double baselineMinDeltaMs = 10;
 
     @Value("${loadtest.detector.planCostTolerancePct:0.20}")
     private double planCostTolerancePct;
@@ -264,7 +272,8 @@ public class DegradationDetector {
 
         double baseP95   = baselineResult.getP95Ms();
         double threshold = baseP95 * (1 + baselineTolerancePct);
-        if (current.getP95Ms() > threshold) {
+        if (current.getP95Ms() > threshold
+                && current.getP95Ms() - baseP95 >= baselineMinDeltaMs) {
             degradations.add(DegradationReport.Degradation.builder()
                     .queryId(queryId)
                     .type(DegradationReport.DegradationType.BASELINE_EXCEEDED)

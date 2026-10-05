@@ -104,11 +104,7 @@ public final class DpReleaseBuilder {
             double sigma = gaussianSigma(Math.sqrt(2.0), eps, del);
             double threshold = 1.0 + sigma * Math.sqrt(2.0 * Math.log(1.0 / del));
             for (Map.Entry<String, Map<String, Long>> e : stringCounts.entrySet()) {
-                Map<String, Double> released = new TreeMap<>();
-                for (Map.Entry<String, Long> c : e.getValue().entrySet()) {
-                    double noisy = c.getValue() + noise.nextGaussian() * sigma;
-                    if (noisy > threshold) released.put(c.getKey(), Math.rint(noisy));
-                }
+                Map<String, Double> released = releaseHistogram(e.getValue(), sigma, threshold);
                 if (released.isEmpty()) suppressed.add(e.getKey());
                 else categorical.put(e.getKey(), released);
             }
@@ -135,6 +131,29 @@ public final class DpReleaseBuilder {
             sum   += c;
             sumSq += c * c;
         }
+        return releaseNumericMoments(n, sum, sumSq, lo, hi, eps, del);
+    }
+
+    /**
+     * Thresholded Gaussian histogram: a value is released only if its noisy count exceeds
+     * {@code threshold}, so rare values (potential identifiers) are never published.
+     */
+    Map<String, Double> releaseHistogram(Map<String, Long> counts, double sigma, double threshold) {
+        Map<String, Double> released = new TreeMap<>();
+        for (Map.Entry<String, Long> c : counts.entrySet()) {
+            double noisy = c.getValue() + noise.nextGaussian() * sigma;
+            if (noisy > threshold) released.put(c.getKey(), Math.rint(noisy));
+        }
+        return released;
+    }
+
+    /**
+     * Gaussian release of a clipped mean and second moment from pre-aggregated sums
+     * ({@code sum} and {@code sumSq} must already be computed over values clipped to
+     * {@code [lo, hi]}). Used for both row-level and table-level releases.
+     */
+    DpRelease.NumericColumn releaseNumericMoments(long n, double sum, double sumSq,
+                                                  double lo, double hi, double eps, double del) {
         double mean = sum / n;
         double m2   = sumSq / n;
         double maxSq = Math.max(lo * lo, hi * hi);

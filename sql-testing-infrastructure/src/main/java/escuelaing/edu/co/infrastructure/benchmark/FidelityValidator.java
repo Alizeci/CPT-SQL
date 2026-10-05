@@ -121,8 +121,11 @@ public class FidelityValidator {
                 .privacyMode(dataGenerator.getLastPrivacyMode())
                 .epsilonNumeric(dp ? release.getEpsilonNumeric() : 0.0)
                 .epsilonCategorical(dp ? release.getEpsilonCategorical() : 0.0)
-                .epsilonTotal(dp ? release.getEpsilonNumeric() + release.getEpsilonCategorical() : 0.0)
-                .delta(dp ? release.getDelta() : 0.0)
+                .epsilonForeignKey(dp ? release.getEpsilonForeignKey() : 0.0)
+                .epsilonTotal(dp ? release.getEpsilonNumeric() + release.getEpsilonCategorical()
+                        + release.getEpsilonForeignKey() : 0.0)
+                .delta(dp ? release.getDelta() + release.getDeltaForeignKey() : 0.0)
+                .dpForeignKeys(dataGenerator.getLastFkRelationsApplied())
                 .dpSourceRows(dp ? release.getSourceRows() : 0L)
                 .dpReleasedColumns(dp && release.getNumeric() != null
                         ? new java.util.ArrayList<>(release.getNumeric().keySet()) : java.util.List.of())

@@ -22,7 +22,12 @@ public class DataQuality {
     private double epsilonNumeric;
     /** Budget spent on categorical histograms. */
     private double epsilonCategorical;
+    /** Budget spent on foreign-key degree shapes. */
+    private double epsilonForeignKey;
+    /** Total δ (attribute release + foreign-key release, basic composition). */
     private double delta;
+    /** Foreign keys generated from the released degree shape (child_table.fk_column). */
+    private java.util.List<String> dpForeignKeys;
     /** Number of sanitized rows summarised by the release. */
     private long dpSourceRows;
     /** Numeric columns released (with declared bounds). */

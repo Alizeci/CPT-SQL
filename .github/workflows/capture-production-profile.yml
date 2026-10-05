@@ -13,6 +13,16 @@ on:
         required: false
         type: string
         default: ''
+      dp-categorical:
+        description: 'Declared categorical columns released as table-level histograms (table.column,...). Undeclared text columns are not released.'
+        required: false
+        type: string
+        default: ''
+      dp-epsilon-fk:
+        description: 'Privacy budget for foreign-key degree shapes (0 disables it)'
+        required: false
+        type: string
+        default: '0.4'
       dp-epsilon-numeric:
         description: 'Privacy budget for numeric columns'
         required: false
@@ -50,6 +60,8 @@ jobs:
           CPT_DP_BOUNDS: ${{ inputs.dp-bounds }}
           CPT_DP_EPSILON_NUMERIC: ${{ inputs.dp-epsilon-numeric }}
           CPT_DP_EPSILON_CATEGORICAL: ${{ inputs.dp-epsilon-categorical }}
+          CPT_DP_CATEGORICAL: ${{ inputs.dp-categorical }}
+          CPT_DP_EPSILON_FK: ${{ inputs.dp-epsilon-fk }}
           DB_URL: ${{ secrets.DB_URL }}
           DB_USER: ${{ secrets.DB_USER }}
           DB_PASSWORD: ${{ secrets.DB_PASSWORD }}

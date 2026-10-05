@@ -148,6 +148,18 @@ public class SyntheticDataGenerator {
      */
     private final Map<String, List<Integer>> pkCache = new HashMap<>();
 
+    /** Foreign-key samplers built from the DP release, keyed {@code child_table.fk_column}. */
+    private final Map<String, FkSampler> fkSamplers = new HashMap<>();
+
+    /** Shared popularity ranking of each parent table (same hot parents for every child table). */
+    private final Map<String, List<Integer>> parentRanking = new HashMap<>();
+
+    /** Table currently being bulk-loaded (lets FK columns find their sampler). */
+    private String currentTable;
+
+    /** Foreign-key relations generated from the released degree shape in the last populate. */
+    private List<String> lastFkRelationsApplied = Collections.emptyList();
+
     /** Reseeds {@code rng} with the Spring-injected {@code seed}. */
     @PostConstruct
     void initRng() {
@@ -165,6 +177,9 @@ public class SyntheticDataGenerator {
     public long getLastRowsGenerated()  { return lastRowsGenerated; }
     public int  getLastTablesPopulated() { return lastTablesPopulated; }
     public int  getRowsPerTable()        { return rowsPerTable; }
+
+    /** Foreign keys whose values followed the released concentration curve in the last populate. */
+    public List<String> getLastFkRelationsApplied() { return lastFkRelationsApplied; }
 
     /** {@value #MODE_DP_RELEASE} or {@value #MODE_LEGACY} for the last populate. */
     public String getLastPrivacyMode()   { return lastPrivacyMode; }
@@ -275,6 +290,9 @@ public class SyntheticDataGenerator {
     public void populate(Connection conn, LoadProfile profile) throws SQLException {
         LOG.info("[SyntheticData] Starting mirror database population...");
         pkCache.clear();
+        fkSamplers.clear();
+        parentRanking.clear();
+        List<String> fkApplied = new ArrayList<>();
         conn.setAutoCommit(false);
         try {
             List<String> tables = discoverUserTables(conn);
@@ -319,8 +337,12 @@ public class SyntheticDataGenerator {
                 List<ColumnMeta> cols = describeTable(conn, table);
                 if (cols.isEmpty()) continue;
                 Map<String, String> fkCols = fkConstraints.getOrDefault(table, Collections.emptyMap());
+                if (hasRelease) prepareFkSamplers(conn, table, fkCols, profile.getDpRelease(), fkApplied);
+                currentTable = table;
                 insertRows(conn, table, cols, rowsPerTable, dpStats, fkCols, columnStringPool, checkNumericBounds);
+                currentTable = null;
             }
+            lastFkRelationsApplied = Collections.unmodifiableList(fkApplied);
 
             conn.commit();
 
@@ -738,6 +760,8 @@ public class SyntheticDataGenerator {
         if (category == ColumnCategory.IDENTIFIER) {
             String parentTable = fkColumns != null ? fkColumns.get(col.name) : null;
             if (parentTable != null) {
+                FkSampler sampler = currentTable != null ? fkSamplers.get(currentTable + "." + col.name) : null;
+                if (sampler != null) return String.valueOf(sampler.next(rng));
                 Integer existingId = pickExistingPk(conn, parentTable);
                 return String.valueOf(existingId != null ? existingId : generateUiiPseudonym());
             }
@@ -860,6 +884,88 @@ public class SyntheticDataGenerator {
         }
         List<Integer> ids = pkCache.get(tableName);
         return ids.isEmpty() ? null : ids.get(rng.nextInt(ids.size()));
+    }
+
+    /**
+     * Builds, for each FK column of {@code table} with a released degree shape, a sampler
+     * that assigns child rows to parents following the released concentration curve.
+     * Parents are ranked by a seeded permutation shared by all child tables of the same
+     * parent (assumption: a parent's popularity is common to its child tables).
+     */
+    private void prepareFkSamplers(Connection conn, String table, Map<String, String> fkCols,
+                                   DpRelease release, List<String> applied) throws SQLException {
+        if (release.getForeignKeys() == null || release.getForeignKeys().isEmpty()) return;
+        for (Map.Entry<String, String> fk : fkCols.entrySet()) {
+            String key = table + "." + fk.getKey();
+            DpRelease.ForeignKeyDegree shape = release.getForeignKeys().get(key);
+            if (shape == null || shape.getRankFractions() == null || shape.getCumulativeShare() == null) continue;
+            List<Integer> ranked = parentRanking.get(fk.getValue());
+            if (ranked == null) {
+                ranked = new ArrayList<>();
+                try (PreparedStatement ps = conn.prepareStatement(
+                        "SELECT id FROM " + quoteIdent(conn, fk.getValue()) + " ORDER BY id");
+                     ResultSet rs = ps.executeQuery()) {
+                    while (rs.next()) ranked.add(rs.getInt(1));
+                }
+                Collections.shuffle(ranked, rng);
+                parentRanking.put(fk.getValue(), ranked);
+            }
+            if (ranked.isEmpty()) continue;
+            fkSamplers.put(key, FkSampler.of(ranked, shape.getRankFractions(), shape.getCumulativeShare()));
+            applied.add(key);
+            LOG.info(String.format("[SyntheticData] FK %s -> %s follows released degree shape "
+                    + "(top 1%% of parents: %.1f%% of rows).", key, fk.getValue(),
+                    100 * escuelaing.edu.co.infrastructure.capture.FkDegreeProfiler.shareAt(shape, 1e-2)));
+        }
+    }
+
+    /**
+     * Samples parent ids with probability proportional to a piecewise-constant weight:
+     * parents of segment i (ranks between consecutive released fractions) share the
+     * released mass {@code share[i] − share[i−1]} equally.
+     */
+    static final class FkSampler {
+        private final int[]    ids;
+        private final double[] cumulative;
+
+        private FkSampler(int[] ids, double[] cumulative) {
+            this.ids = ids;
+            this.cumulative = cumulative;
+        }
+
+        static FkSampler of(List<Integer> rankedIds, List<Double> fractions, List<Double> shares) {
+            int n = rankedIds.size();
+            int[] ids = new int[n];
+            for (int i = 0; i < n; i++) ids[i] = rankedIds.get(i);
+            double[] cum = new double[n];
+            double prevShare = 0, carry = 0, acc = 0;
+            int start = 0;
+            for (int s = 0; s < fractions.size(); s++) {
+                int end = s == fractions.size() - 1 ? n
+                        : (int) Math.min(n, Math.max(start, Math.round(fractions.get(s) * n)));
+                double mass = Math.max(0.0, shares.get(s) - prevShare) + carry;
+                prevShare = Math.max(prevShare, shares.get(s));
+                if (end <= start) { carry = mass; continue; }
+                carry = 0;
+                double w = mass / (end - start);
+                for (int i = start; i < end; i++) { acc += w; cum[i] = acc; }
+                start = end;
+            }
+            if (acc <= 0) {                       // degenerate release → uniform
+                for (int i = 0; i < n; i++) cum[i] = i + 1;
+            }
+            return new FkSampler(ids, cum);
+        }
+
+        int next(Random rng) {
+            double u = rng.nextDouble() * cumulative[cumulative.length - 1];
+            int lo = 0, hi = cumulative.length - 1;
+            while (lo < hi) {
+                int mid = (lo + hi) >>> 1;
+                if (cumulative[mid] > u) hi = mid; else lo = mid + 1;
+            }
+            return ids[lo];
+        }
     }
 
     private double defaultMeanFor(String dataType) {
