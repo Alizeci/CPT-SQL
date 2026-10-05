@@ -51,6 +51,30 @@ public class QueryExecutor {
         this.adapter = adapter;
     }
 
+    /**
+     * Per-statement timeout on the mirror database (default 60 s).
+     *
+     * <p>A severely degraded query must produce a measurable result, not hang the job until
+     * the CI timeout kills it and every measurement is lost. When the limit is reached the
+     * statement is cancelled and recorded with a latency equal to the limit, so it is
+     * reported as {@code P95_EXCEEDED} with its own diagnostic message.</p>
+     */
+    @org.springframework.beans.factory.annotation.Value("${loadtest.benchmark.statementTimeoutMs:60000}")
+    private long statementTimeoutMs = 60_000;
+
+    /** Number of statements cancelled by the timeout in the current JVM (reported in the log). */
+    private long timedOutStatements = 0;
+
+    public long getTimedOutStatements() { return timedOutStatements; }
+
+    private int timeoutSeconds() {
+        return (int) Math.max(1, Math.ceil(statementTimeoutMs / 1000.0));
+    }
+
+    private static boolean isTimeout(SQLException e) {
+        return e instanceof java.sql.SQLTimeoutException || "57014".equals(e.getSQLState());
+    }
+
     /** String parameter pool populated from the load profile before the benchmark runs. */
     private List<String> stringPool = Collections.emptyList();
 
@@ -125,7 +149,9 @@ public class QueryExecutor {
         Instant start   = Instant.now();
         long    startNs = System.nanoTime();
 
+        boolean timedOut = false;
         try (PreparedStatement ps = conn.prepareStatement(resolvedSql)) {
+            ps.setQueryTimeout(timeoutSeconds());
             List<Object> params = collectAndBind(ps, resolvedSql, accessDist, zipfAlpha);
             plan    = captureExplainPlan(conn, resolvedSql, params);
             start   = Instant.now();
@@ -142,10 +168,21 @@ public class QueryExecutor {
                 }
             }
         } catch (SQLException e) {
-            LOG.warning("[QueryExecutor] Error executing '" + queryId + "': " + e.getMessage());
+            if (isTimeout(e)) {
+                timedOut = true;
+                timedOutStatements++;
+            } else {
+                LOG.warning("[QueryExecutor] Error executing '" + queryId + "': " + e.getMessage());
+            }
         }
 
         long latencyMs = (System.nanoTime() - startNs) / 1_000_000;
+        if (timedOut) {
+            // Record at least the limit so the degradation is visible in p95 / SLA compliance.
+            latencyMs = Math.max(latencyMs, statementTimeoutMs);
+            LOG.warning("[QueryExecutor] '" + queryId + "' cancelled after " + statementTimeoutMs
+                    + " ms (statement timeout) — recorded as " + latencyMs + " ms (severe degradation).");
+        }
 
         return TransactionRecord.builder()
                 .queryId(queryId)
@@ -348,6 +385,7 @@ public class QueryExecutor {
 
     private String captureExplainPlan(Connection conn, String sql, List<Object> params) {
         try (PreparedStatement ps = conn.prepareStatement(adapter.buildExplainAnalyze(sql))) {
+            ps.setQueryTimeout(timeoutSeconds());
             for (int i = 0; i < params.size(); i++) {
                 ps.setObject(i + 1, params.get(i));
             }
