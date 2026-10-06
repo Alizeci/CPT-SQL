@@ -170,6 +170,12 @@ public class BenchmarkRunner {
         long prevTps      = accumulator.lastTargetTps;
         int  targetTps    = phase.getTargetTps();
 
+        // The measurement start must be set before the loop so that the
+        // latency time series records time elapsed since the start of measurement.
+        if (phase.isMeasurement() && accumulator.measurementStartMs == 0) {
+            accumulator.measurementStartMs = phaseStartMs;
+        }
+
         long windowStartMs = phaseStartMs;
         List<TransactionRecord> windowSamples = new ArrayList<>();
 
@@ -207,10 +213,6 @@ public class BenchmarkRunner {
             emitSnapshots(windowSamples,
                     System.currentTimeMillis() - accumulator.measurementStartMs,
                     phase.getName(), accumulator);
-        }
-
-        if (phase.isMeasurement() && accumulator.measurementStartMs == 0) {
-            accumulator.measurementStartMs = phaseStartMs;
         }
 
         accumulator.lastTargetTps = targetTps;
