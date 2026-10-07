@@ -32,34 +32,39 @@ import java.util.stream.Collectors;
 import java.util.zip.CRC32;
 
 /**
- * Populates the mirror database with synthetic data derived only from the
- * differentially-private release produced in Phase 2 ({@link DpRelease}).
+ * Populates the mirror database with synthetic data generated from the protected statistics
+ * (the differentially private release, {@link DpRelease}) in the load profile.
  *
- * <p><b>What reaches the mirror:</b> numeric business columns are sampled from
- * N(mean, std) using the released (noisy) mean and standard deviation, clamped to the
- * declared bounds; categorical columns are sampled from the released noisy histogram;
- * identifier columns receive synthetic pseudonyms or references to synthetic parent rows.
- * Because the generator only post-processes the release, it consumes no additional
- * privacy budget, and no captured row or identifier is ever inserted.</p>
+ * <p><b>What reaches the mirror:</b> numeric columns are sampled from N(mean, std) using the
+ * released mean and standard deviation, clamped to the declared bounds; categorical columns
+ * are sampled from the released histogram; foreign-key columns follow the released
+ * foreign-key concentration curve over synthetic parent rows; other identifier columns
+ * receive random pseudonyms. Because the generator only post-processes the release, it
+ * consumes no additional privacy budget, and no captured row or identifier is inserted.</p>
  *
- * <p><b>Legacy profiles</b> (without {@code dpRelease}) fall back to statistics computed
- * directly from {@code sanitizedRealData}; that path offers no formal guarantee and is
- * reported as {@code LEGACY_UNPROTECTED} in the validation report. Inserting raw
- * sanitized rows requires the explicit opt-in {@code loadtest.synthetic.seedRealRows=true}.</p>
+ * <p><b>Profiles without a release</b> fall back to statistics computed directly from
+ * {@code sanitizedRealData}. This debugging-only path offers no formal privacy guarantee and
+ * is reported as {@value #MODE_LEGACY}. Inserting the raw sanitized rows additionally
+ * requires the opt-in {@code loadtest.synthetic.seedRealRows=true}.</p>
  *
- * <p>Generation uses a single seeded {@link java.util.Random}, so two runs with the same
- * seed and the same release are byte-identical.</p>
+ * <p>All randomness comes from one seeded {@link java.util.Random}, so two runs with the same
+ * seed and the same load profile produce the same data, except timestamp columns, which are
+ * drawn relative to the current time (and are ignored by {@link #computeChecksum}).</p>
  *
- * <p>Tables are discovered via {@code INFORMATION_SCHEMA.tables} — the generator
- * is schema-agnostic and works with any PostgreSQL schema without modification.
- * Foreign key constraints are discovered from {@code INFORMATION_SCHEMA} and used
- * to sort tables topologically (parents before children) and to generate FK column
- * values that reference existing rows in the parent table.</p>
+ * <p>Base tables of the {@code public} schema are discovered through
+ * {@code INFORMATION_SCHEMA}, so no per-application configuration is needed. Foreign keys are
+ * discovered as well and used to populate parents before children and to make FK values
+ * reference existing parent rows. Catalog queries, {@code TRUNCATE ... CASCADE},
+ * {@code VACUUM ANALYZE} and identifier quoting are PostgreSQL-specific; only the bulk load
+ * goes through the {@link DatabaseDialect}.</p>
+ *
+ * <p>Not thread-safe: {@link #populate} keeps per-run state in instance fields.</p>
  *
  * <pre>
  * loadtest.synthetic.rowsPerTable=500
  * loadtest.synthetic.seed=42
  * loadtest.synthetic.seedRealRows=false   # opt-in, debugging only
+ * loadtest.synthetic.sensitiveColumns=    # comma-separated, see buildStringPool
  * </pre>
  */
 @Component
@@ -71,7 +76,7 @@ public class SyntheticDataGenerator {
         this.adapter = adapter;
     }
 
-    /** For tests — defaults to PostgresDialect. */
+    /** For tests: uses {@link escuelaing.edu.co.infrastructure.dialect.PostgresDialect}. */
     SyntheticDataGenerator() {
         this(new escuelaing.edu.co.infrastructure.dialect.PostgresDialect());
     }
@@ -81,25 +86,34 @@ public class SyntheticDataGenerator {
     /** Privacy mode reported when the profile carries a {@link DpRelease}. */
     public static final String MODE_DP_RELEASE = "DP_RELEASE";
 
-    /** Privacy mode reported for legacy profiles that only carry raw sanitized rows. */
+    /** Privacy mode reported for profiles without a release (raw sanitized rows only). */
     public static final String MODE_LEGACY = "LEGACY_UNPROTECTED";
 
     /**
-     * Pseudonym range for identifier columns without a resolvable parent table.
-     * Pseudonyms are random and carry no production information; they may coincide
-     * numerically with production identifiers, which is harmless because no
-     * production row is ever copied.
+     * Inclusive range of random pseudonyms for identifier columns that have no resolvable
+     * parent row. Pseudonyms carry no information from the capture environment; they may
+     * coincide numerically with real identifiers, which is harmless because no captured row
+     * is copied.
      */
     private static final int UII_MIN = 10_001;
     private static final int UII_MAX = 99_999;
 
-    /** Max acceptable p95 error (%) between synthetic and production latency in fidelity validation. */
+    /**
+     * Fidelity validation: maximum relative p95 error (%) between the mirror database and
+     * the capture environment for a query to pass (exclusive).
+     */
     static final double LATENCY_ERROR_THRESHOLD_PCT = 10.0;
 
-    /** Max acceptable cardinality error (%) for write queries in fidelity validation. */
+    /**
+     * Fidelity validation: maximum relative error (%) in rows affected by write queries for a
+     * query to pass (exclusive).
+     */
     static final double CARDINALITY_ERROR_THRESHOLD_PCT = 5.0;
 
-    /** Cardinality ratio above which a string column is considered high-cardinality (likely PII). */
+    /**
+     * Distinct/total ratio above which a captured string column is treated as free text or
+     * personal data and excluded from the string pools.
+     */
     private static final double STRING_CARDINALITY_THRESHOLD = 0.5;
 
     @Value("${loadtest.synthetic.rowsPerTable:500}")
@@ -110,21 +124,24 @@ public class SyntheticDataGenerator {
 
 
     /**
-     * Comma-separated list of column names to exclude from the string parameter pool.
-     * Configure in {@code application.properties} (keep out of version control).
-     * Columns not listed here are filtered automatically by cardinality.
+     * Comma-separated column names excluded from the string parameter pool built from
+     * {@code sanitizedRealData} (see {@link #buildStringPool}). Columns not listed are still
+     * filtered by cardinality. Not used when the profile carries a release.
      */
     @Value("${loadtest.synthetic.sensitiveColumns:}")
     private String sensitiveColumnsRaw;
 
-    /** Opt-in (debugging only): inserts raw sanitized rows from legacy profiles into the mirror. */
+    /**
+     * Opt-in, debugging only: inserts raw sanitized rows into the mirror database when the
+     * profile has no release. Ignored when a release is present.
+     */
     @Value("${loadtest.synthetic.seedRealRows:false}")
     private boolean seedRealRows = false;
 
     /** Privacy mode of the last {@link #populate} call. */
     private String lastPrivacyMode = MODE_LEGACY;
 
-    /** DP release used by the last {@link #populate} call (null for legacy profiles). */
+    /** Release used by the last {@link #populate} call ({@code null} without a release). */
     private DpRelease lastDpRelease;
 
     /** Numeric column statistics used by the last populate: col → [mean, std, lower, upper]. */
@@ -142,13 +159,12 @@ public class SyntheticDataGenerator {
     private int lastTablesPopulated = 0;
 
     /**
-     * Cache of primary key values per table, populated lazily during {@link #populate}.
-     * Cleared at the start of each populate call so stale IDs from a previous mirror
-     * run are never reused.
+     * Primary key values per table, loaded lazily during {@link #populate} and cleared at the
+     * start of each call so identifiers from a previous run are never reused.
      */
     private final Map<String, List<Integer>> pkCache = new HashMap<>();
 
-    /** Foreign-key samplers built from the DP release, keyed {@code child_table.fk_column}. */
+    /** Foreign-key samplers built from the release, keyed {@code child_table.fk_column}. */
     private final Map<String, FkSampler> fkSamplers = new HashMap<>();
 
     /** Shared popularity ranking of each parent table (same hot parents for every child table). */
@@ -157,7 +173,7 @@ public class SyntheticDataGenerator {
     /** Table currently being bulk-loaded (lets FK columns find their sampler). */
     private String currentTable;
 
-    /** Foreign-key relations generated from the released degree shape in the last populate. */
+    /** Foreign keys generated from the released concentration curve in the last populate. */
     private List<String> lastFkRelationsApplied = Collections.emptyList();
 
     /** Reseeds {@code rng} with the Spring-injected {@code seed}. */
@@ -184,7 +200,7 @@ public class SyntheticDataGenerator {
     /** {@value #MODE_DP_RELEASE} or {@value #MODE_LEGACY} for the last populate. */
     public String getLastPrivacyMode()   { return lastPrivacyMode; }
 
-    /** DP release used by the last populate, or {@code null} for legacy profiles. */
+    /** Release used by the last populate, or {@code null} if the profile had none. */
     public DpRelease getLastDpRelease()  { return lastDpRelease; }
 
     /** Numeric statistics (col → [mean, std, lower, upper]) used by the last populate. */
@@ -196,25 +212,25 @@ public class SyntheticDataGenerator {
     /** Whether raw sanitized rows may be inserted (opt-in). */
     public boolean isSeedRealRows()      { return seedRealRows; }
 
-    // Column classification: Feature vs UII
+    // Column classification: feature vs identifier
 
     /**
-     * Column categories for differentially-private data generation.
+     * Column categories used during generation.
      *
      * <ul>
-     *   <li>{@code IDENTIFIER} — any column named {@code id} or ending in {@code _id}.
-     *       Replaced by a pseudonym in the exclusive range [{@code UII_MIN}, {@code UII_MAX}]
-     *       so real identifiers never enter the mirror database.</li>
-     *   <li>{@code FEATURE} — any other column (numeric business values, strings, booleans).
-     *       Generated preserving the statistical distribution from production.</li>
+     *   <li>{@code IDENTIFIER}: any column named {@code id} or ending in {@code _id}. Receives
+     *       a reference to an existing parent row when it is a foreign key, otherwise a
+     *       pseudonym in the inclusive range [{@code UII_MIN}, {@code UII_MAX}], so real
+     *       identifiers never enter the mirror database.</li>
+     *   <li>{@code FEATURE}: any other column (numbers, strings, booleans, timestamps).
+     *       Generated from the released statistics when available, otherwise from defaults.</li>
      * </ul>
      */
     public enum ColumnCategory { FEATURE, IDENTIFIER }
 
     /**
-     * Classifies a column as IDENTIFIER or FEATURE based on its name.
-     * Any column named {@code id} or ending with {@code _id} is treated as an identifier
-     * and receives a pseudonym — regardless of the domain it represents.
+     * Classifies a column by name only: {@code id} or a {@code _id} suffix (case-insensitive)
+     * is {@code IDENTIFIER}, anything else is {@code FEATURE}. {@code tableName} is unused.
      */
     public ColumnCategory classifyColumn(String tableName, String columnName) {
         String col = columnName.toLowerCase();
@@ -225,8 +241,8 @@ public class SyntheticDataGenerator {
     }
 
     /**
-     * Generates an integer pseudonym in [{@code UII_MIN}, {@code UII_MAX}]
-     * that never collides with real production IDs (typical range 1–10000).
+     * Returns a random integer pseudonym in [{@code UII_MIN}, {@code UII_MAX}] (inclusive),
+     * drawn from the seeded generator.
      */
     public int generateUiiPseudonym() {
         return UII_MIN + rng.nextInt(UII_MAX - UII_MIN + 1);
@@ -235,12 +251,13 @@ public class SyntheticDataGenerator {
     // Checksum for reproducibility verification
 
     /**
-     * Computes a CRC32 checksum over the current contents of {@code tableName}.
-     * Used to verify that two generations with the same seed produce byte-identical data.
+     * Computes a CRC32 checksum over the contents of {@code tableName}, ordered by the first
+     * column. Used to verify that two generations with the same seed produce identical data.
+     * Timestamp columns and {@code NULL}s are skipped.
      *
      * @param conn      open connection to the mirror database
      * @param tableName table to checksum
-     * @return CRC32 checksum over all rows in the table
+     * @return CRC32 over the string form of every non-timestamp value
      */
     public long computeChecksum(Connection conn, String tableName) throws SQLException {
         CRC32 crc = new CRC32();
@@ -251,7 +268,7 @@ public class SyntheticDataGenerator {
             int cols = meta.getColumnCount();
             while (rs.next()) {
                 for (int i = 1; i <= cols; i++) {
-                    // Skip timestamp columns — DEFAULT NOW() differs between runs
+                    // Timestamps depend on the current time (generated or DEFAULT NOW())
                     int sqlType = meta.getColumnType(i);
                     if (sqlType == java.sql.Types.TIMESTAMP
                             || sqlType == java.sql.Types.TIMESTAMP_WITH_TIMEZONE) continue;
@@ -266,26 +283,24 @@ public class SyntheticDataGenerator {
     // Public API
 
     /**
-     * Populates the mirror database with synthetic data derived from {@code profile}.
-     * Tables are discovered automatically via {@code INFORMATION_SCHEMA} — no schema
-     * configuration is required.
+     * Replaces the contents of every table in the mirror database with {@code rowsPerTable}
+     * synthetic rows generated from {@code profile}.
      *
-     * <p>Foreign key constraints are discovered and used to:</p>
-     * <ol>
-     *   <li>Sort tables topologically so parent tables are always populated before their
-     *       dependents, avoiding FK violations during insertion.</li>
-     *   <li>Generate FK column values by selecting a random existing ID from the parent
-     *       table instead of an arbitrary pseudonym that would violate the constraint.</li>
-     * </ol>
+     * <p>Steps: discover tables and foreign keys, order tables parents-first, truncate them,
+     * derive numeric statistics and categorical pools (from the release, or from
+     * {@code sanitizedRealData} when there is none), add value lists and bounds from simple
+     * CHECK constraints for columns the profile does not cover, then bulk-load each table.
+     * With a release, FK columns follow the released foreign-key concentration curve; otherwise
+     * they reference a uniformly chosen existing parent row.</p>
      *
-     * <p>Each row is inserted individually with its own savepoint so that a single
-     * constraint violation does not discard the entire batch for that table.
-     * VARCHAR columns with low cardinality (enum-like CHECK constraints) are generated
-     * by sampling from values observed in production via {@code sanitizedRealData},
-     * preserving referential integrity without requiring schema-specific configuration.</p>
+     * <p>Truncation and loading run in one transaction that is rolled back on failure. After
+     * the commit, {@code VACUUM ANALYZE} refreshes planner statistics; its failure is only
+     * logged. The connection is left in auto-commit mode.</p>
      *
      * @param conn    open connection to the mirror database
-     * @param profile Phase 2 load profile used to calibrate distributions
+     * @param profile load profile; may be {@code null}, in which case default distributions
+     *                are used
+     * @throws SQLException if discovery, truncation or loading fails (after rollback)
      */
     public void populate(Connection conn, LoadProfile profile) throws SQLException {
         LOG.info("[SyntheticData] Starting mirror database population...");
@@ -319,12 +334,11 @@ public class SyntheticDataGenerator {
             lastNumericStats = dpStats;
             lastColumnPools  = columnStringPool;
 
-            // Discover CHECK constraints to fill any gaps left by the production string pool.
-            // Enum-like columns (e.g. status, tier) whose values never appear in query SELECT
-            // results are covered here using the schema's own constraint metadata.
+            // CHECK constraints cover enum-like columns (e.g. status, tier) that the profile
+            // does not describe.
             CheckConstraints checks = discoverCheckConstraints(conn);
 
-            // Production-observed values take precedence; CHECK values fill the gaps.
+            // Profile pools take precedence; CHECK values only fill the gaps.
             checks.enumValues().forEach(columnStringPool::putIfAbsent);
             Map<String, double[]> checkNumericBounds = checks.numericBounds();
 
@@ -346,11 +360,9 @@ public class SyntheticDataGenerator {
 
             conn.commit();
 
-            // Update planner statistics after bulk load.
-            // Without this, pg_statistic is stale post-COPY: the planner assumes
-            // default selectivity, falls back to Seq Scan, and produces
-            // unrepresentative Mirror Accuracy measurements. VACUUM ANALYZE also
-            // reclaims dead pages from the preceding TRUNCATE.
+            // Refresh planner statistics after the bulk load. Without them the planner uses
+            // default selectivity estimates and may choose plans (e.g. Seq Scan) that make
+            // mirror latencies unrepresentative.
             try (Statement stAnalyze = conn.createStatement()) {
                 conn.setAutoCommit(true); // VACUUM cannot run inside an explicit transaction
                 for (String table : sortedTables) {
@@ -378,11 +390,9 @@ public class SyntheticDataGenerator {
     // Schema discovery
 
     /**
-     * Truncates all user tables before each population run, ensuring the benchmark
-     * is deterministic across profiles. Tables are listed comma-separated in a single
-     * TRUNCATE so PostgreSQL resolves FK ordering automatically via CASCADE.
-     * RESTART IDENTITY resets sequences to 1 so generated IDs are byte-identical
-     * across runs with the same seed.
+     * Empties {@code tables} with a single {@code TRUNCATE ... RESTART IDENTITY CASCADE}, so
+     * every run starts from an empty mirror database. Restarting identities makes generated
+     * IDs identical across runs with the same seed.
      */
     private void truncateTables(Connection conn, List<String> tables) throws SQLException {
         if (tables.isEmpty()) return;
@@ -395,6 +405,7 @@ public class SyntheticDataGenerator {
         LOG.info("[SyntheticData] Tables truncated: " + tables);
     }
 
+    /** Returns the base tables of the {@code public} schema, sorted by name. */
     List<String> discoverUserTables(Connection conn) throws SQLException {
         List<String> tables = new ArrayList<>();
         String sql = """
@@ -416,22 +427,20 @@ public class SyntheticDataGenerator {
      * Discovers simple CHECK constraints in the public schema and extracts the allowed
      * values or numeric bounds they impose on individual columns.
      *
-     * <p>Two patterns are recognised from the text returned by
-     * {@code pg_get_constraintdef()}:</p>
+     * <p>Two patterns are recognized in the text returned by {@code pg_get_constraintdef()}:</p>
      * <ul>
-     *   <li><b>IN / ANY</b> — {@code CHECK (col IN ('A','B'))} or the internal
-     *       {@code = ANY (ARRAY[...])} form produced by PostgreSQL. The quoted string
-     *       literals are extracted and stored as the allowed value list for that column.
-     *       Used in {@link #setColumnValue} to sample realistic enum values instead of
-     *       random alphanumeric strings.</li>
-     *   <li><b>BETWEEN / range</b> — {@code CHECK (col BETWEEN 0 AND 5)} or the
-     *       expanded {@code col >= 0 AND col <= 5} form. The lower and upper bounds are
-     *       stored as a two-element array and used to override the DP-calibrated clamp
-     *       in {@link #setColumnValue} for numeric columns.</li>
+     *   <li><b>IN / ANY</b>: {@code CHECK (col IN ('A','B'))} or PostgreSQL's
+     *       {@code = ANY (ARRAY[...])} form. The quoted literals become the allowed values of
+     *       that column; {@link #populate} uses them as its categorical pool when the profile
+     *       has none.</li>
+     *   <li><b>BETWEEN / range</b>: {@code CHECK (col BETWEEN 0 AND 5)} or the expanded
+     *       {@code col >= 0 AND col <= 5} form, with non-negative literals. The bounds replace
+     *       the released (or observed) clamp bounds for that numeric column.</li>
      * </ul>
      *
-     * <p>Constraints that do not match either pattern are silently ignored — the
-     * generator falls back to its default behaviour for those columns.</p>
+     * <p>Results are keyed by lower-case column name only, so equally named columns in
+     * different tables share them. Other constraints are ignored and the affected columns
+     * keep their default generation.</p>
      *
      * @param conn open connection to the mirror database
      * @return {@link CheckConstraints} with enum values and numeric bounds discovered
@@ -466,7 +475,7 @@ public class SyntheticDataGenerator {
                     List<String> values = new ArrayList<>();
                     while (m.find()) values.add(m.group(1));
                     if (!values.isEmpty()) {
-                        // Column name is the first identifier before IN or = ANY
+                        // Column name: the identifier right before IN or = ANY
                         java.util.regex.Matcher colM = java.util.regex.Pattern
                                 .compile("(?i)\\(?([a-zA-Z_][a-zA-Z0-9_]*)\\)?(?:::\\w+)?\\s*(?:=\\s*ANY|IN\\s*\\()")
                                 .matcher(def);
@@ -501,9 +510,10 @@ public class SyntheticDataGenerator {
     }
 
     /**
-     * Discovers all foreign key constraints in the public schema.
+     * Discovers all foreign key constraints in the {@code public} schema.
      *
-     * @return map of child_table → (fk_column → parent_table)
+     * @return map of child_table → (fk_column → parent_table); parents are assumed to have an
+     *         integer {@code id} primary key
      */
     Map<String, Map<String, String>> discoverFkConstraints(Connection conn) throws SQLException {
         Map<String, Map<String, String>> result = new HashMap<>();
@@ -538,10 +548,8 @@ public class SyntheticDataGenerator {
     }
 
     /**
-     * Sorts {@code tables} in topological order so that each table appears after all
-     * tables it depends on via foreign keys. Uses an iterative algorithm that repeatedly
-     * selects tables whose parents are already placed. If a cycle is detected (no
-     * progress possible), the remaining tables are appended as-is.
+     * Sorts {@code tables} so that each table appears after the tables it references through
+     * foreign keys. Tables in an FK cycle are appended at the end in their original order.
      */
     List<String> topologicalSort(List<String> tables,
                                   Map<String, Map<String, String>> fkMap) {
@@ -597,11 +605,15 @@ public class SyntheticDataGenerator {
     // Row insertion
 
     /**
-     * Seeds the mirror database with real sanitized rows from the load profile,
-     * then fills the remaining volume with synthetic rows.
+     * Debugging only ({@code seedRealRows=true} and no release): inserts each row of
+     * {@code sanitizedRealData} into the table whose columns best match its keys. The
+     * synthetic rows are loaded afterwards by {@link #populate}.
      *
-     * <p>FK columns are resolved against the already-populated parent table so that
-     * referential integrity is maintained without exposing real production identifiers.</p>
+     * <p>Identifier columns are never copied: FK columns reference an existing parent row
+     * (or a pseudonym if the parent is still empty) and other identifiers get a pseudonym.
+     * Columns with a default are left to the database. A row that violates a constraint is
+     * rolled back to its savepoint and discarded; only the SQLState is logged, never the
+     * message, which could contain captured values.</p>
      */
     void insertRealSanitizedData(Connection conn, LoadProfile profile,
                                   List<String> tables,
@@ -695,29 +707,26 @@ public class SyntheticDataGenerator {
     private static final DateTimeFormatter TS_FMT =
             DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss").withZone(ZoneOffset.UTC);
 
-    /**
-     * Inserts {@code rows} synthetic rows into {@code table} using PostgreSQL COPY.
-     *
-     * <p>COPY streams CSV data directly to the PostgreSQL server, bypassing the SQL
-     * parser and per-row WAL overhead of individual INSERT statements. Throughput is
-     * typically 50–100× faster than per-row executeUpdate, making volumes of hundreds
-     * of thousands of rows practical for both light and nightly pipelines.</p>
-     *
-     * <p>Rows are generated in batches of {@value #COPY_BATCH_SIZE} to keep heap
-     * usage bounded regardless of {@code rowsPerTable}.</p>
-     */
+    /** Rows generated per bulk-insert call; bounds heap usage regardless of row count. */
     private static final int COPY_BATCH_SIZE = 100_000;
 
+    /**
+     * Inserts {@code rows} synthetic rows into {@code table} through
+     * {@link DatabaseDialect#bulkInsert} (PostgreSQL {@code COPY}), which is much faster than
+     * per-row {@code INSERT}s. Rows are generated as CSV in batches of
+     * {@value #COPY_BATCH_SIZE}.
+     *
+     * @throws SQLException wrapping any bulk-insert failure; a single bad row fails the table
+     */
     private void insertRows(Connection conn, String table,
                              List<ColumnMeta> cols, int rows,
                              Map<String, double[]> dpStats,
                              Map<String, String> fkColumns,
                              Map<String, List<String>> columnStringPool,
                              Map<String, double[]> checkNumericBounds) throws SQLException {
-        // Columns with a DEFAULT are left to the database unless we have a model for them.
-        // A released numeric model counts as a model: without this, columns such as
-        // stock_quantity (DEFAULT 0) or total_amount (DEFAULT 0) were silently filled with
-        // their default in every row, ignoring the DP release.
+        // Columns with a DEFAULT are left to the database unless a categorical pool, CHECK
+        // bounds or numeric statistics describe them; otherwise every row would get the
+        // default (e.g. 0) and ignore the released statistics.
         List<ColumnMeta> insertable = cols.stream()
                 .filter(c -> c.defaultValue == null || c.defaultValue.isEmpty()
                         || columnStringPool.containsKey(c.name.toLowerCase())
@@ -753,8 +762,21 @@ public class SyntheticDataGenerator {
     }
 
     /**
-     * Generates a single CSV-encoded value for the given column.
-     * String values are quoted and internal double-quotes are escaped as {@code ""}.
+     * Generates one CSV-encoded value for {@code col} in the current table.
+     *
+     * <ul>
+     *   <li>Identifiers: FK columns use the table's concentration-curve sampler when one
+     *       exists, else a uniformly chosen existing parent id, else a pseudonym; other
+     *       identifiers get a pseudonym.</li>
+     *   <li>Integers and decimals: N(mean, std) clamped to the CHECK bounds, else the released
+     *       bounds; decimals are rounded to two places. Without statistics, type defaults
+     *       are used (integers clamped to [1, 10 000]).</li>
+     *   <li>Strings: sampled from the column's pool, else a random alphanumeric string.</li>
+     *   <li>Booleans: uniform. Timestamps: uniform over the last 30 days.</li>
+     * </ul>
+     *
+     * <p>String and timestamp values are quoted, with inner double quotes escaped as
+     * {@code ""}.</p>
      */
     private String generateCsvValue(ColumnMeta col,
                                      Map<String, double[]> dpStats,
@@ -808,18 +830,11 @@ public class SyntheticDataGenerator {
     }
 
     /**
-     * Sets the value for a single column in {@code ps} at position {@code idx}.
+     * Binds a generated value for {@code col} at position {@code idx} of {@code ps}. Used by
+     * the debugging-only real-row path for columns missing from a captured row.
      *
-     * <p>IDENTIFIER columns receive a pseudonym from the UII range or an existing FK id.
-     * FEATURE columns are generated as follows:</p>
-     * <ul>
-     *   <li>Numeric types: Gaussian noise around the DP-calibrated mean, clamped to the
-     *       observed production min/max so values stay within any range CHECK constraints.</li>
-     *   <li>String types: sampled from the per-column pool built from {@code sanitizedRealData}
-     *       when available (preserves enum-like values such as status codes); falls back to a
-     *       random alphanumeric string for columns absent from production samples.</li>
-     *   <li>Boolean/timestamp: uniform random.</li>
-     * </ul>
+     * <p>Same rules as {@link #generateCsvValue}, except that FK columns always use a
+     * uniformly chosen existing parent id (no concentration-curve sampler).</p>
      */
     private void setColumnValue(PreparedStatement ps, int idx, ColumnMeta col,
                                  Map<String, double[]> dpStats,
@@ -840,8 +855,7 @@ public class SyntheticDataGenerator {
         double[] stats  = dpStats.get(col.name);
         double mean     = stats != null ? stats[0] : defaultMeanFor(col.dataType);
         double sigma    = stats != null ? stats[1] : defaultSigmaFor(col.dataType);
-        // CHECK constraint bounds take precedence over production-observed min/max:
-        // they are the hard schema limits, while the DP-observed range is a soft guide.
+        // CHECK bounds are hard schema limits and take precedence over the statistics' bounds.
         double[] schemaBounds = checkNumericBounds.get(col.name.toLowerCase());
         double minVal = schemaBounds != null ? schemaBounds[0]
                 : (stats != null && stats.length > 2 ? stats[2] : 0.01);
@@ -860,9 +874,7 @@ public class SyntheticDataGenerator {
                     ps.setTimestamp(idx, java.sql.Timestamp.from(java.time.Instant.now()
                             .minusSeconds(rng.nextInt(86_400 * 30))));
             case "char", "character", "character varying", "varchar", "text" -> {
-                // Sample from production-observed values for this column when available.
-                // Enum-like columns (status, tier, category) will thus receive valid values
-                // without any schema-specific configuration.
+                // The pool keeps enum-like columns (status, tier, ...) within valid values.
                 List<String> colPool = columnStringPool.getOrDefault(col.name, Collections.emptyList());
                 ps.setString(idx, colPool.isEmpty()
                         ? randomString(6, 20)
@@ -873,9 +885,9 @@ public class SyntheticDataGenerator {
     }
 
     /**
-     * Returns a random primary key value from {@code tableName}, caching up to 10 000
-     * IDs per table. A larger cache ensures good FK distribution when child tables
-     * have hundreds of thousands of rows. Returns {@code null} if the table is empty.
+     * Returns a uniformly chosen {@code id} from {@code tableName}, or {@code null} if the
+     * table is empty. The first call per table caches the 10 000 lowest ids; later calls
+     * reuse that cache until the next {@link #populate}, even if the table grows.
      */
     private Integer pickExistingPk(Connection conn, String tableName) throws SQLException {
         if (!pkCache.containsKey(tableName)) {
@@ -893,10 +905,11 @@ public class SyntheticDataGenerator {
     }
 
     /**
-     * Builds, for each FK column of {@code table} with a released degree shape, a sampler
-     * that assigns child rows to parents following the released concentration curve.
-     * Parents are ranked by a seeded permutation shared by all child tables of the same
-     * parent (assumption: a parent's popularity is common to its child tables).
+     * Builds, for each FK column of {@code table} with a released foreign-key concentration
+     * curve, a sampler that assigns child rows to parents following that curve, and records
+     * the key in {@code applied}. Parents are ranked by a seeded permutation shared by all
+     * child tables of the same parent (assumption: a parent's popularity is common to its
+     * child tables). FKs whose parent table is empty are skipped.
      */
     private void prepareFkSamplers(Connection conn, String table, Map<String, String> fkCols,
                                    DpRelease release, List<String> applied) throws SQLException {
@@ -928,7 +941,8 @@ public class SyntheticDataGenerator {
     /**
      * Samples parent ids with probability proportional to a piecewise-constant weight:
      * parents of segment i (ranks between consecutive released fractions) share the
-     * released mass {@code share[i] − share[i−1]} equally.
+     * released mass {@code share[i] − share[i−1]} equally. A segment that rounds to no parents
+     * passes its mass to the next one; a release with no positive mass yields a uniform sampler.
      */
     static final class FkSampler {
         private final int[]    ids;
@@ -991,23 +1005,17 @@ public class SyntheticDataGenerator {
     // String parameter pool for QueryExecutor
 
     /**
-     * Builds a pool of string values extracted from {@code sanitizedRealData} in the profile.
-     * The pool is used by {@link QueryExecutor} to bind VARCHAR parameters with realistic,
-     * distribution-preserving values instead of hardcoded domain strings.
+     * Builds the pool of string values that {@link QueryExecutor} uses to bind VARCHAR
+     * parameters during load replay.
      *
-     * <p>Values are collected with repetition so that random sampling from the pool
-     * naturally reproduces the production frequency distribution (e.g. if "DELIVERED"
-     * appears in 70 % of rows, it will be sampled ~70 % of the time).</p>
+     * <p>Values are kept with repetition so that uniform sampling from the pool reproduces
+     * their frequencies (a value in 70 % of rows is drawn about 70 % of the time). With a
+     * release, the pool is the concatenation of all released categorical pools (see
+     * {@link #poolsFromRelease}). Without one, values come from {@code sanitizedRealData},
+     * excluding columns listed in {@code loadtest.synthetic.sensitiveColumns} and columns whose
+     * distinct/total ratio exceeds {@link #STRING_CARDINALITY_THRESHOLD}.</p>
      *
-     * <p>Two filters are applied in order:</p>
-     * <ol>
-     *   <li><b>Explicit config:</b> columns listed in {@code loadtest.synthetic.sensitiveColumns}
-     *       are always excluded.</li>
-     *   <li><b>Cardinality fallback:</b> columns where
-     *       {@code uniqueValues / totalValues > 0.5} are excluded as likely PII.</li>
-     * </ol>
-     *
-     * @return immutable list of safe string values; empty if no suitable values found
+     * @return unmodifiable list of string values; empty if none are available
      */
     public List<String> buildStringPool(LoadProfile profile) {
         if (profile != null && profile.getDpRelease() != null) {
@@ -1057,20 +1065,13 @@ public class SyntheticDataGenerator {
     }
 
     /**
-     * Builds a per-column pool of string values extracted from {@code sanitizedRealData}.
+     * Fallback for profiles without a release: builds per-column categorical pools from
+     * {@code sanitizedRealData} (values kept with repetition), so enum-like string columns
+     * such as {@code status} receive captured values instead of random strings. Columns whose
+     * distinct/total ratio exceeds {@link #STRING_CARDINALITY_THRESHOLD} are excluded;
+     * {@code sensitiveColumns} is not applied here.
      *
-     * <p>Used in {@link #setColumnValue} so that VARCHAR columns with low-cardinality
-     * values (enum-like CHECK constraints such as {@code status} or {@code tier}) are
-     * populated with values observed in production rather than random alphanumeric
-     * strings. The approach is entirely schema-agnostic: no column or table names are
-     * hardcoded — the pool is built dynamically from whatever columns appear in the
-     * captured profile.</p>
-     *
-     * <p>High-cardinality columns (likely free-text or PII, cardinality ratio above
-     * {@link #STRING_CARDINALITY_THRESHOLD}) are excluded using the same threshold as
-     * {@link #buildStringPool}.</p>
-     *
-     * @return map of column name → observed string values; empty map if profile is null
+     * @return map of column name → string values; empty if the profile has no queries
      */
     Map<String, List<String>> buildColumnStringPool(LoadProfile profile) {
         if (profile == null || profile.getQueries() == null) return Collections.emptyMap();
@@ -1105,14 +1106,16 @@ public class SyntheticDataGenerator {
                 .collect(Collectors.toSet());
     }
 
-    // Legacy statistics (profiles without dpRelease)
+    // Fallback statistics (profiles without a release)
 
     /**
-     * LEGACY: computes per-column statistics directly from {@code sanitizedRealData}.
+     * Fallback for profiles without a release: computes per-column statistics directly from
+     * the numeric values in {@code sanitizedRealData}.
      *
-     * <p>Used only for profiles generated before the DP release existed. No noise is
-     * applied and the observed min/max are used as clamp bounds, so this path offers
-     * no formal privacy guarantee; it is reported as {@value #MODE_LEGACY}.</p>
+     * <p>No noise is added and the observed min/max become the clamp bounds, so this
+     * debugging-only path offers no formal privacy guarantee; it is reported as
+     * {@value #MODE_LEGACY}. Negative values are ignored, columns with fewer than two values
+     * are skipped, and the standard deviation is floored at 0.1.</p>
      *
      * @return map of column name → [mean, std, observedMin, observedMax]
      */
@@ -1132,9 +1135,6 @@ public class SyntheticDataGenerator {
                 }
             }
         }
-
-        // LEGACY path (profiles without dpRelease): statistics computed directly from raw
-        // sanitized rows. Kept for backward compatibility only — offers no formal guarantee.
 
         Map<String, double[]> dpStats = new HashMap<>();
         for (Map.Entry<String, List<Double>> entry : columnValues.entrySet()) {
@@ -1172,17 +1172,15 @@ public class SyntheticDataGenerator {
     /**
      * Samples a synthetic value from N(base, sigma²) using the seeded generator.
      *
-     * <p>This is <em>data generation</em> (post-processing of already released
-     * statistics), not a privacy mechanism: the privacy noise is applied once, at
-     * capture time, by {@link escuelaing.edu.co.infrastructure.capture.DpReleaseBuilder}.</p>
+     * <p>This is data generation (post-processing of released statistics), not a privacy
+     * mechanism: privacy noise is added once, in the capture environment, by
+     * {@link escuelaing.edu.co.infrastructure.capture.DpReleaseBuilder}.</p>
      */
     double gaussianNoise(double base, double sigma) {
         return base + rng.nextGaussian() * sigma;
     }
 
-    // -------------------------------------------------------------------------
-    // DP release → generator inputs (post-processing, no extra budget)
-    // -------------------------------------------------------------------------
+    // Release → generator inputs (post-processing, no extra privacy budget)
 
     /** Converts released numeric columns into {@code col → [mean, std, lower, upper]}. */
     static Map<String, double[]> numericStatsFromRelease(DpRelease release) {
@@ -1195,7 +1193,8 @@ public class SyntheticDataGenerator {
 
     /**
      * Converts released histograms into value pools whose frequencies are proportional
-     * to the released counts (scaled so each pool has at most 1 000 entries).
+     * to the released counts, scaled to about 1 000 entries per pool. Every released value
+     * appears at least once; histograms with a non-positive total are skipped.
      */
     static Map<String, List<String>> poolsFromRelease(DpRelease release) {
         Map<String, List<String>> out = new HashMap<>();
@@ -1229,10 +1228,8 @@ public class SyntheticDataGenerator {
     }
 
     /**
-     * Returns the PostgreSQL-quoted form of {@code identifier} using
-     * {@code pg_catalog.quote_ident()}, ensuring that table and column names
-     * discovered from INFORMATION_SCHEMA are safe to embed in SQL strings
-     * even if they contain special characters or reserved words.
+     * Quotes {@code identifier} with {@code pg_catalog.quote_ident()} so discovered table and
+     * column names are safe to embed in SQL, even with special characters or reserved words.
      */
     private String quoteIdent(Connection conn, String identifier) throws SQLException {
         try (PreparedStatement ps = conn.prepareStatement("SELECT pg_catalog.quote_ident(?)")) {

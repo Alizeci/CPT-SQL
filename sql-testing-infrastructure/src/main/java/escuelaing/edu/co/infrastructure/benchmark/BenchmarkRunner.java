@@ -30,19 +30,21 @@ import java.util.Map;
 import java.util.logging.Logger;
 
 /**
- * Orchestrates Phase 3: provisions the mirror database, populates it with
- * synthetic data, and drives the benchmark execution loop.
+ * Runs the benchmark: provisions the mirror database, populates it with synthetic data
+ * generated from the load profile, and replays the load on a single connection.
  *
  * <p>Iterates over {@link TestProfile} phases in order; only samples from phases
- * marked {@code measurement=true} are included in the result. Throughput is
- * regulated in CLOSED_LOOP mode — the runner sleeps between iterations to match
- * the target TPS. LINEAR phases interpolate throughput from the previous phase's
- * target; STEP phases jump immediately to the new target.</p>
+ * marked {@code measurement=true} are included in the result. Each loop iteration
+ * executes every query selected by the phase's mixture once, then sleeps
+ * {@code 1000 / effectiveTps} ms ({@code thinkTimeMs} when the target is 0). Execution
+ * time is not subtracted, so the achieved rate is at most the target. LINEAR phases
+ * interpolate the target from the previous phase's; other functions use the phase
+ * target directly.</p>
  *
- * <p>Metrics computed per query: p50, p95, p99, mean, min, max latency;
+ * <p>Metrics computed per query: p50, p95, p99 (nearest rank), mean, min, max latency;
  * {@code slaComplianceRate} (% of operations within {@code @Req.maxResponseTimeMs});
- * average planner cost from EXPLAIN ANALYZE; TPS and latency time-series
- * sampled every {@code metricsWindowSecs} seconds.</p>
+ * {@code slaRiskPct} (p95 as % of the SLA); average plan cost from EXPLAIN ANALYZE;
+ * TPS and latency time series sampled every {@code metricsWindowSecs} seconds.</p>
  *
  * <pre>
  * loadtest.benchmark.profileName=nightly
@@ -75,8 +77,8 @@ public class BenchmarkRunner {
     private int metricsWindowSecs;
 
     /**
-     * Minimum SLA compliance rate for a query verdict to be PASS.
-     * If {@code slaComplianceRate} falls below this threshold the query is marked FAIL.
+     * Minimum SLA compliance rate (%) for a query verdict to be PASS. A query is FAIL
+     * when its p95 exceeds the SLA or its {@code slaComplianceRate} is below this value.
      */
     @Value("${loadtest.sla.complianceThresholdPct:95.0}")
     private double slaComplianceThresholdPct;
@@ -99,16 +101,19 @@ public class BenchmarkRunner {
         this.fidelityValidator = fidelityValidator;
     }
 
-    // -------------------------------------------------------------------------
     // Public API
-    // -------------------------------------------------------------------------
 
-    /** Runs the benchmark using the test profile configured in application.properties. */
+    /** Runs the benchmark using the test profile configured in {@code loadtest.benchmark.testProfile}. */
     public BenchmarkResult run(LoadProfile profile, String commitSha) {
         return run(profile, TestProfile.fromName(testProfileName), commitSha);
     }
 
-    /** Runs the benchmark with an explicit test profile. */
+    /**
+     * Runs the benchmark with an explicit test profile and persists the result under
+     * {@code build/results}.
+     *
+     * @throws RuntimeException if the mirror database cannot be opened or populated
+     */
     public BenchmarkResult run(LoadProfile profile, TestProfile testProfile, String commitSha) {
         LOG.info("[BenchmarkRunner] Starting benchmark '" + profileName
                 + "' with TestProfile '" + testProfile.getName() + "'");
@@ -135,8 +140,9 @@ public class BenchmarkRunner {
     }
 
     /**
-     * Runs fidelity validation before the benchmark.
-     * Throws {@link ValidationFailedException} if validation does not pass.
+     * Optionally runs the fidelity validation (mirror accuracy included) before the
+     * benchmark and persists its report. Unlike the gate entry point, this variant is
+     * strict: it throws {@link ValidationFailedException} if validation does not pass.
      */
     public BenchmarkResult runWithValidation(LoadProfile profile, String commitSha, boolean validate) {
         if (validate) {
@@ -149,9 +155,7 @@ public class BenchmarkRunner {
         return run(profile, commitSha);
     }
 
-    // -------------------------------------------------------------------------
     // Phase execution
-    // -------------------------------------------------------------------------
 
     private void executePhase(Connection conn,
                                LoadProfile profile,
@@ -229,6 +233,10 @@ public class BenchmarkRunner {
         return targetTps;
     }
 
+    /**
+     * Queries run by {@code phase}: all for DEFAULT, reads (SELECT or unknown SQL) for
+     * READ_HEAVY, writes for WRITE_HEAVY. Falls back to all queries if the filter is empty.
+     */
     private Map<String, LoadProfile.QueryStats> selectQueries(LoadProfile profile,
                                                                TestProfile.Phase phase) {
         if (phase.getMixturePreset() == TestProfile.MixturePreset.DEFAULT) {
@@ -247,9 +255,7 @@ public class BenchmarkRunner {
         return filtered.isEmpty() ? profile.getQueries() : filtered;
     }
 
-    // -------------------------------------------------------------------------
     // Time-series snapshots
-    // -------------------------------------------------------------------------
 
     private void emitSnapshots(List<TransactionRecord> windowSamples,
                                 long elapsedMs,
@@ -282,9 +288,7 @@ public class BenchmarkRunner {
         }
     }
 
-    // -------------------------------------------------------------------------
     // Result aggregation
-    // -------------------------------------------------------------------------
 
     private BenchmarkResult buildResult(PhaseAccumulator accumulator,
                                          LoadProfile profile,
@@ -387,9 +391,13 @@ public class BenchmarkRunner {
     }
 
     /**
-     * SHA-256 over the inputs that determine the synthetic mirror: the DP release
-     * (or, for legacy profiles, the sanitized rows). Captured SQL and latency statistics
-     * are deliberately excluded, so a PR that only changes SQL keeps the same fingerprint.
+     * Fingerprint of the inputs that determine the mirror database: the differentially
+     * private release, or the raw {@code sanitizedRealData} rows for legacy profiles.
+     * Captured SQL and latency statistics are deliberately excluded, so a PR that only
+     * changes SQL keeps the same fingerprint.
+     *
+     * @return first 8 bytes of a SHA-256 digest as 16 hex characters, or {@code null}
+     *         if {@code profile} is null or hashing fails
      */
     public static String fingerprint(LoadProfile profile) {
         if (profile == null) return null;
@@ -425,13 +433,11 @@ public class BenchmarkRunner {
                 .sum();
     }
 
-    // -------------------------------------------------------------------------
     // Persistence
-    // -------------------------------------------------------------------------
 
     /**
-     * Persists the result as a versioned JSON file at
-     * {@code build/results/benchmark-<profile>-<timestamp>.json}.
+     * Writes the result to {@code build/results/benchmark-<profile>-<timestamp>.json}
+     * (UTC timestamp). I/O errors are logged, not thrown.
      */
     public void persistBenchmarkResult(BenchmarkResult result) {
         try {
@@ -447,7 +453,10 @@ public class BenchmarkRunner {
         }
     }
 
-    /** Persists the validation report at {@code build/validation/VALIDATION_REPORT.json}. */
+    /**
+     * Writes the report to {@code build/validation/VALIDATION_REPORT.json}, overwriting the
+     * previous one. I/O errors are logged, not thrown.
+     */
     public void persistValidationReport(ValidationReport report) {
         try {
             Path dir = Path.of("build", "validation");
@@ -459,10 +468,9 @@ public class BenchmarkRunner {
         }
     }
 
-    // -------------------------------------------------------------------------
     // Utilities
-    // -------------------------------------------------------------------------
 
+    /** Nearest-rank percentile of an ascending list; 0 when empty. */
     private double percentile(List<Long> sorted, double p) {
         if (sorted.isEmpty()) return 0.0;
         int index = (int) Math.ceil(p / 100.0 * sorted.size()) - 1;
@@ -478,10 +486,7 @@ public class BenchmarkRunner {
         }
     }
 
-    // -------------------------------------------------------------------------
-    // Phase accumulator
-    // -------------------------------------------------------------------------
-
+    /** Mutable state carried across the phases of one run. */
     private static class PhaseAccumulator {
         final List<TransactionRecord>                            allSamples       = new ArrayList<>();
         final List<BenchmarkResult.ThroughputSnapshot>           throughputSeries = new ArrayList<>();

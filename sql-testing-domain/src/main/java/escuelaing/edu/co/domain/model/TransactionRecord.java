@@ -7,8 +7,8 @@ import java.time.Instant;
 import java.util.Map;
 
 /**
- * Single SQL execution captured by the JDBC wrapper (Phase 2).
- * The atomic unit used to build the {@link LoadProfile}.
+ * Single SQL execution recorded by the JDBC wrapper in the capture environment; the
+ * atomic unit aggregated into the {@link LoadProfile}.
  */
 @Data
 @Builder
@@ -16,6 +16,7 @@ public class TransactionRecord {
 
     private String queryId;
     private String sql;
+    /** Execution latency in milliseconds. */
     private long latencyMs;
     private Instant timestamp;
 
@@ -26,8 +27,8 @@ public class TransactionRecord {
     private long rowCount;
 
     /**
-     * Sanitized row data (Feature columns only, no PII).
-     * {@code null} for write operations.
+     * Sanitized row data (business feature columns only, no PII); {@code null} for write
+     * operations. Input to the differentially private release; never persisted by default.
      */
     private Map<String, Object> sanitizedData;
 }

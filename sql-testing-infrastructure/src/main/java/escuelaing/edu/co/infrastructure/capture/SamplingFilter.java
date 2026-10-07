@@ -15,12 +15,12 @@ import java.util.concurrent.ThreadLocalRandom;
  *   <li>Forced capture ({@link CaptureContext#isForced()}) → always record.</li>
  *   <li>{@code priority == HIGH} → always record.</li>
  *   <li>Latency exceeds {@code maxResponseTimeMs} declared in {@code @Req}
- *       → always record (performance anomaly).</li>
- *   <li>None of the above → record with 10 % probability.</li>
+ *       → always record (potential degradation).</li>
+ *   <li>None of the above → record with a fixed 10 % probability.</li>
  * </ol>
  *
- * <p>If the {@code queryId} is not in the registry (legacy code without
- * {@code @SqlQuery}), only the probabilistic rule applies.</p>
+ * <p>If the {@code queryId} is not in the registry (no {@code @SqlQuery} declaration),
+ * only the forced and probabilistic rules apply. Thread-safe.</p>
  */
 @Component
 public class SamplingFilter {

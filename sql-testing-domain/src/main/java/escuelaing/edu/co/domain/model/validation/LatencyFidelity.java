@@ -4,8 +4,8 @@ import lombok.Builder;
 import lombok.Data;
 
 /**
- * Latency fidelity result for a single query.
- * Pass criterion: {@code errorPct < 10 %}.
+ * Latency fidelity result for a single query: p95 in the mirror database versus the
+ * capture environment. Pass criterion: {@code errorPct < 10 %}.
  */
 @Data
 @Builder
@@ -19,8 +19,11 @@ public class LatencyFidelity {
     private double errorPct;
 
     private boolean pass;
-    /** True when p95RealMs is below the latency floor; reported but not aggregated. */
+    /**
+     * True when {@code p95RealMs} is below the latency floor
+     * ({@code loadtest.fidelity.latencyFloorMs}, default 10 ms); reported but not aggregated.
+     */
     private boolean excluded;
-    /** Number of production samples behind p95RealMs. */
+    /** Number of capture samples behind {@code p95RealMs}. */
     private long sampleCountReal;
 }

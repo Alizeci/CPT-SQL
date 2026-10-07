@@ -17,23 +17,24 @@ import java.util.TreeMap;
 import java.util.logging.Logger;
 
 /**
- * Differentially-private release of the <em>shape</em> of each foreign-key relation of the
- * capture database: how strongly child rows concentrate on a few parent rows
+ * Differentially private foreign-key concentration curve for each foreign-key relation of
+ * the capture database: how strongly child rows concentrate on a few parent rows
  * (e.g. best-selling products owning most order items).
  *
- * <p>Per-column statistics cannot express this, and without it a synthetic mirror spreads
- * child rows uniformly across parents. Queries whose cost depends on that concentration
- * (several joins over the same parent, per-parent aggregates) then look cheap in the mirror
- * while they are expensive in production.</p>
+ * <p>Per-column statistics cannot express this; without it the mirror database spreads
+ * child rows uniformly across parents, and queries whose cost depends on that concentration
+ * (joins over the same parent, per-parent aggregates) look cheaper in the mirror than in
+ * production.</p>
  *
  * <h2>Mechanism</h2>
  * <ul>
  *   <li>For each relation, the degree of every parent (its number of child rows) is
  *       sorted in descending order. Only the cumulative sums at a fixed, data-independent
  *       grid of rank fractions {@link #RANK_FRACTIONS} are released.</li>
- *   <li>Neighbouring datasets differ in one child row. That changes one entry of the sorted
- *       degree sequence by one (Hay, Li, Miklau &amp; Jensen, ICDM 2009), hence every
- *       cumulative sum by at most one: L2 sensitivity of the vector is {@code √m}.</li>
+ *   <li>Neighbouring datasets differ by adding or removing one child row. That changes one
+ *       entry of the sorted degree sequence by one (Hay, Li, Miklau &amp; Jensen, ICDM 2009),
+ *       hence each of the {@code m} cumulative sums by at most one: L2 sensitivity
+ *       {@code √m}.</li>
  *   <li>Gaussian noise {@code σ = √m·√(2 ln(1.25/δ))/ε} per relation, with
  *       {@code (ε, δ)} split evenly across relations. The parent count is treated as public
  *       (it does not change when a child row is added or removed).</li>
@@ -41,10 +42,9 @@ import java.util.logging.Logger;
  *       and made non-increasing (pool-adjacent-violators), then normalised to shares.</li>
  * </ul>
  *
- * <p>Parent identifiers and individual degrees are never released. The generator assumes
- * that a parent's popularity is shared across its child tables (the same products are hot
- * in {@code order_items} and {@code inventory_log}); that assumption is not learnt from
- * data and is documented as such.</p>
+ * <p>Parent identifiers and individual degrees are never released. The mirror generator
+ * assumes a parent's popularity is shared across its child tables (the same products are hot
+ * in every table referencing them); that assumption is not learnt from data.</p>
  */
 public final class FkDegreeProfiler {
 
@@ -60,7 +60,11 @@ public final class FkDegreeProfiler {
 
     private FkDegreeProfiler() {}
 
-    /** Profiles every single-column foreign key of the {@code public} schema. */
+    /**
+     * Profiles every foreign-key column of the {@code public} schema (composite keys are not
+     * treated as a unit), keyed by {@code child_table.column}. Returns an empty map when
+     * {@code epsilonForeignKey <= 0}. Uses {@link SecureRandom} noise.
+     */
     public static Map<String, DpRelease.ForeignKeyDegree> profile(Connection conn, DpConfig config)
             throws SQLException {
         return profile(conn, config, new SecureRandom());
@@ -92,17 +96,19 @@ public final class FkDegreeProfiler {
     }
 
     /**
-     * Pure release step (testable without a database).
+     * Release step for one relation, independent of the database.
      *
      * @param degreesDesc degrees of parents that have at least one child, sorted descending
      * @param parentRows  total number of parent rows (public)
+     * @return the noisy curve, or {@code null} if the parent table is empty
      */
     static DpRelease.ForeignKeyDegree release(String child, String col, String parent,
                                               long[] degreesDesc, long parentRows,
                                               double eps, double del, Random noise) {
         if (parentRows <= 0) return null;
 
-        // Fixed checkpoints k_i = round(q_i · N), deduplicated (tiny parent tables).
+        // Checkpoints k_i = round(q_i · N) clamped to [1, N]; duplicates (small parent tables)
+        // are dropped. They depend only on the public parent count.
         List<Double> fractions = new ArrayList<>();
         List<Long>   ranks     = new ArrayList<>();
         long prev = 0;
@@ -197,7 +203,10 @@ public final class FkDegreeProfiler {
         return out;
     }
 
-    /** Share of child rows owned by the top {@code q} fraction of parents (linear interpolation). */
+    /**
+     * Share of child rows owned by the top {@code q} fraction of parents, linearly
+     * interpolated on the released curve (post-processing).
+     */
     public static double shareAt(DpRelease.ForeignKeyDegree fk, double q) {
         List<Double> f = fk.getRankFractions();
         List<Double> s = fk.getCumulativeShare();
@@ -212,8 +221,6 @@ public final class FkDegreeProfiler {
         }
         return 1.0;
     }
-
-    // ------------------------------------------------------------------ database access
 
     private static List<String[]> discoverForeignKeys(Connection conn) throws SQLException {
         String sql = """
@@ -262,7 +269,7 @@ public final class FkDegreeProfiler {
         return out;
     }
 
-    /** Identifiers come from information_schema; quoted defensively. */
+    /** Quotes an identifier read from {@code information_schema}. */
     private static String quote(String ident) {
         return "\"" + ident.replace("\"", "\"\"") + "\"";
     }

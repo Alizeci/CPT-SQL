@@ -4,14 +4,15 @@ import lombok.Builder;
 import lombok.Data;
 
 /**
- * Cardinality fidelity result for a single write query.
- * Pass criterion: {@code errorPct < 5 %}.
+ * Cardinality fidelity result for a single write query: rows affected in the mirror
+ * database versus the capture environment. Pass criterion: {@code errorPct < 5 %}.
  */
 @Data
 @Builder
 public class CardinalityFidelity {
 
     private String queryId;
+    /** Mean rows affected per execution in the capture environment, truncated. */
     private long rowsReal;
     private long rowsSynthetic;
 

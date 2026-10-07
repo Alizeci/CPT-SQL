@@ -5,23 +5,30 @@ import java.util.LinkedHashMap;
 import java.util.Map;
 
 /**
- * Configuration of the differentially-private release computed at the end of Phase 2.
+ * Privacy budgets and declarations for the differentially private release computed at the
+ * end of a capture.
  *
- * <p>Read from environment variables so that it works identically when the capture
- * runs inside a Spring context or from a plain {@code main} (e.g. the simulator):</p>
+ * <p>{@link #fromEnv()} reads environment variables (falling back to JVM system properties
+ * of the same name), so the configuration is the same inside Spring or a plain
+ * {@code main}. Values shown are the defaults, except the examples for lists:</p>
  * <pre>
- * CPT_DP_BOUNDS=price:0:600,rating:0:5,stock_quantity:0:1000   # declared clipping bounds
+ * CPT_DP_BOUNDS=price:0:600,rating:0:5        # column:lower:upper clipping bounds (none by default)
  * CPT_DP_EPSILON_NUMERIC=0.6
  * CPT_DP_EPSILON_CATEGORICAL=0.4
+ * CPT_DP_EPSILON_FK=0.4                       # foreign-key concentration curves; 0 disables them
  * CPT_DP_DELTA=1e-6
- * CPT_DP_EPSILON_FK=0.4              # foreign-key degree shape; 0 disables it
- * CPT_DP_CATEGORICAL=products.category,orders.status   # declared categorical columns (table-level release)
- * CPT_DP_KEEP_SANITIZED_ROWS=false    # debugging only — keeps raw sanitized rows in the profile
+ * CPT_DP_CATEGORICAL=products.category        # table.column list for the table-level release
+ * CPT_DP_KEEP_SANITIZED_ROWS=false            # debugging only; raw sanitized rows, no DP guarantee
  * </pre>
  *
- * <p>Bounds must be chosen from domain knowledge, never from the captured data:
- * observed extremes would themselves leak individual values. Numeric columns without
- * declared bounds are suppressed (not released).</p>
+ * <p>Bounds are keyed by column name alone and apply to that column in every table. They
+ * must come from domain knowledge, never from the captured data: observed extremes would
+ * themselves leak individual values. Numeric columns without declared bounds are suppressed
+ * (not released).</p>
+ *
+ * <p>By sequential composition the overall guarantee is
+ * {@code (ε_numeric + ε_categorical + ε_fk, 2·δ)}: numeric and categorical releases share
+ * one {@code δ}, and the foreign-key release spends its own.</p>
  */
 public record DpConfig(Map<String, double[]> bounds,
                        double epsilonNumeric,
@@ -36,7 +43,7 @@ public record DpConfig(Map<String, double[]> bounds,
     public static final double DEFAULT_DELTA               = 1e-6;
     public static final double DEFAULT_EPSILON_FK          = 0.4;
 
-    /** Backwards-compatible constructor (foreign-key release with the default budget). */
+    /** Uses the default foreign-key budget and no declared categorical columns. */
     public DpConfig(Map<String, double[]> bounds, double epsilonNumeric, double epsilonCategorical,
                     double delta, boolean keepSanitizedRows) {
         this(bounds, epsilonNumeric, epsilonCategorical, delta, keepSanitizedRows, DEFAULT_EPSILON_FK,
@@ -59,7 +66,11 @@ public record DpConfig(Map<String, double[]> bounds,
                 parseColumns(env("CPT_DP_CATEGORICAL", "")));
     }
 
-    /** Parses {@code "table.col,table2.col2"} (lower-cased, blanks ignored). */
+    /**
+     * Parses {@code "table.col,table2.col2"} (lower-cased, blanks ignored).
+     *
+     * @throws IllegalArgumentException if an entry is not a plain {@code table.column}
+     */
     public static java.util.List<String> parseColumns(String raw) {
         java.util.List<String> out = new java.util.ArrayList<>();
         if (raw == null || raw.isBlank()) return out;
@@ -74,7 +85,11 @@ public record DpConfig(Map<String, double[]> bounds,
         return java.util.Collections.unmodifiableList(out);
     }
 
-    /** Parses {@code "col:lo:hi,col2:lo:hi"} (column names are lower-cased). */
+    /**
+     * Parses {@code "col:lo:hi,col2:lo:hi"} (column names are lower-cased).
+     *
+     * @throws IllegalArgumentException if an entry is malformed or {@code hi <= lo}
+     */
     public static Map<String, double[]> parseBounds(String raw) {
         Map<String, double[]> out = new LinkedHashMap<>();
         if (raw == null || raw.isBlank()) return out;

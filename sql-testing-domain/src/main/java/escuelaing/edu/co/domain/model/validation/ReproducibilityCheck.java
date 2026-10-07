@@ -4,8 +4,8 @@ import lombok.Builder;
 import lombok.Data;
 
 /**
- * Reproducibility check: two runs with the same seed must produce byte-identical data.
- * Equality is verified via CRC32 over all generated table contents.
+ * Reproducibility check: two mirror generations with the same seed must produce
+ * byte-identical data. Equality is verified by XOR-combining per-table CRC32 checksums.
  */
 @Data
 @Builder

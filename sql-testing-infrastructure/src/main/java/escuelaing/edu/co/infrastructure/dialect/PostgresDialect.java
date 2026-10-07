@@ -9,7 +9,10 @@ import java.sql.Connection;
 import java.util.List;
 import java.util.Map;
 
-/** PostgreSQL 17 implementation of {@link DatabaseDialect}. Active by default. */
+/**
+ * PostgreSQL 17 implementation of {@link DatabaseDialect}; the only complete dialect and the
+ * one registered as a Spring bean.
+ */
 @Component
 public class PostgresDialect implements DatabaseDialect {
 
@@ -53,7 +56,10 @@ public class PostgresDialect implements DatabaseDialect {
         return "EXPLAIN ANALYZE " + sql;
     }
 
-    /** Parses {@code cost=X..Y} on the root plan node and returns Y (total cost). */
+    /**
+     * Parses the first {@code cost=X..Y} (the root plan node) and returns Y, the total cost.
+     * Returns {@code 0.0} when the output is empty or the cost cannot be parsed.
+     */
     @Override
     public double parsePlanCost(String explainOutput) {
         if (explainOutput == null || explainOutput.isBlank()) return 0.0;
@@ -71,8 +77,9 @@ public class PostgresDialect implements DatabaseDialect {
     }
 
     /**
-     * Extracts the root node type from a PostgreSQL EXPLAIN ANALYZE output.
+     * Returns the first plan line up to the cost parenthesis, without any {@code ->} marker.
      * Example: {@code "->  Index Scan using idx on t  (cost=..."} → {@code "Index Scan using idx on t"}.
+     * Returns an empty string for empty output.
      */
     @Override
     public String parsePlanRootNode(String explainOutput) {

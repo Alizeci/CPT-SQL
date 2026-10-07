@@ -8,19 +8,20 @@ import lombok.NoArgsConstructor;
 import java.util.Map;
 
 /**
- * Differentially-private summary of the sanitized business columns observed during
- * Phase 2 capture.
+ * Differentially private release of the business columns of the capture environment,
+ * computed either over the whole capture tables or over the sanitized rows read during
+ * capture, plus optional foreign-key concentration curves.
  *
  * <p>This is the only information about production values that leaves the capture
  * environment: raw sanitized rows are discarded after the release is computed
  * (unless explicitly retained for debugging). Numeric columns are released as a
  * clipped mean and standard deviation using the Gaussian mechanism with declared
  * (data-independent) bounds; categorical columns are released as a thresholded
- * noisy histogram. Downstream consumers (synthetic data generator, parameter
- * binding) only post-process this release, so they consume no extra budget.</p>
+ * noisy histogram. Downstream consumers (mirror data generation, parameter binding)
+ * only post-process this release, so they consume no extra budget.</p>
  *
- * <p>Neighbouring datasets differ in one captured row (record-level DP, bounded
- * neighbour relation with public {@code n}). User-level protection is out of scope.</p>
+ * <p>Neighbouring datasets differ in one row (record-level DP, bounded neighbour relation
+ * with public {@code n}). User-level protection is out of scope.</p>
  */
 @Data
 @Builder
@@ -31,16 +32,19 @@ public class DpRelease {
     /** Human-readable mechanism description, persisted for auditability. */
     private String mechanism;
 
-    /** Total budget spent on numeric columns (split evenly across mean + second moment of each column). */
+    /** Total ε spent on numeric columns (split evenly across the mean and second moment of each column). */
     private double epsilonNumeric;
 
-    /** Total budget spent on categorical histograms (split evenly across columns). */
+    /** Total ε spent on categorical histograms (split evenly across columns). */
     private double epsilonCategorical;
 
-    /** Total δ (split evenly across all releases). */
+    /** δ of the numeric and categorical releases (split evenly across them). */
     private double delta;
 
-    /** Number of sanitized rows used as input (treated as public). */
+    /**
+     * Input size, treated as public: the number of sanitized rows for a release over captured
+     * rows, or the largest per-column row count for a release over whole tables.
+     */
     private long sourceRows;
 
     /** Released statistics per numeric column. */
@@ -49,20 +53,23 @@ public class DpRelease {
     /** Released (noisy, thresholded) counts per value, per categorical column. */
     private Map<String, Map<String, Double>> categorical;
 
-    /** Columns observed but not released (e.g. numeric without declared bounds). */
+    /**
+     * Columns observed but not released: numeric columns without declared bounds, or
+     * categorical columns whose every value fell below the release threshold.
+     */
     private java.util.List<String> suppressedColumns;
 
     /**
-     * Total budget spent on foreign-key degree releases (split evenly across relations).
+     * Total ε spent on foreign-key concentration curves (split evenly across relations).
      * Zero when no relation was released.
      */
     private double epsilonForeignKey;
 
-    /** δ spent on foreign-key degree releases (split evenly across relations). */
+    /** δ spent on foreign-key concentration curves (split evenly across relations). */
     private double deltaForeignKey;
 
     /**
-     * Released shape of each foreign-key relation, keyed {@code child_table.fk_column}.
+     * Released foreign-key concentration curve of each relation, keyed {@code child_table.fk_column}.
      * Captures how child rows concentrate on parent rows (e.g. a few best-selling products
      * own most order items), which per-column statistics cannot express.
      */
@@ -90,9 +97,9 @@ public class DpRelease {
     }
 
     /**
-     * Differentially-private summary of the degree distribution of one foreign key:
-     * the share of child rows owned by the top {@code q} fraction of parent rows, for a
-     * fixed (data-independent) grid of fractions.
+     * Foreign-key concentration curve: differentially private summary of the degree
+     * distribution of one foreign key, i.e. the share of child rows owned by the top
+     * {@code q} fraction of parent rows, for a fixed (data-independent) grid of fractions.
      *
      * <p>Neighbouring datasets differ in one child row. Adding or removing a child row
      * changes exactly one entry of the sorted degree sequence by one (Hay et al., ICDM

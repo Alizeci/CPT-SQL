@@ -1,9 +1,9 @@
 package escuelaing.edu.co.infrastructure.capture;
 
 /**
- * Propagates the active {@code queryId} to the current thread via a
- * {@link ThreadLocal}, allowing {@link JdbcWrapper} to associate each JDBC
- * execution with a query without modifying method signatures.
+ * Binds the active {@code queryId} to the current thread via a {@link ThreadLocal}, so
+ * {@link JdbcWrapper} can link each JDBC execution to its query without changing method
+ * signatures. State is thread-confined: work handed to another thread is not captured.
  *
  * <p>Always use inside a {@code try-with-resources} block to guarantee cleanup:</p>
  * <pre>{@code
@@ -12,9 +12,9 @@ package escuelaing.edu.co.infrastructure.capture;
  * }
  * }</pre>
  *
- * <p>For warmup capture where sampling must be bypassed unconditionally,
- * use {@link #beginForced}. The forced flag is sticky across nested {@link #begin}
- * calls and is only cleared when the outermost forced context closes:</p>
+ * <p>For warmup capture, where sampling must be bypassed, use {@link #beginForced}. The
+ * forced flag survives nested {@link #begin} calls and is cleared only when the forced
+ * context that set it closes:</p>
  * <pre>{@code
  * try (CaptureContext ctx = CaptureContext.beginForced("getUserOrders")) {
  *     repository.getUserOrders(userId);   // SamplingFilter always records
@@ -22,7 +22,9 @@ package escuelaing.edu.co.infrastructure.capture;
  * }</pre>
  *
  * <p>If {@link JdbcWrapper} executes outside a {@code CaptureContext},
- * {@link #currentQueryId()} returns {@code null} and capture is skipped.</p>
+ * {@link #currentQueryId()} returns {@code null} and nothing is recorded. Closing any
+ * context clears the {@code queryId}; an outer context's id is not restored after a nested
+ * one closes.</p>
  */
 public final class CaptureContext implements AutoCloseable {
 
@@ -51,11 +53,9 @@ public final class CaptureContext implements AutoCloseable {
     }
 
     /**
-     * Opens a forced capture context: {@link SamplingFilter} bypasses all sampling
-     * rules and records the execution unconditionally. Use during warmup to guarantee
-     * every query in the contract is captured at least once regardless of priority or
-     * latency. Inner {@link #begin} calls do not clear the forced flag; only the
-     * outermost forced context clears it on close.
+     * Opens a forced capture context: {@link SamplingFilter} records every execution
+     * regardless of priority or latency. Use during warmup so every declared query is
+     * captured at least once. Inner {@link #begin} calls do not clear the forced flag.
      *
      * @param queryId identifier declared in {@code @SqlQuery#queryId}
      * @return the open forced context (closed automatically on try exit)
@@ -72,17 +72,14 @@ public final class CaptureContext implements AutoCloseable {
         return CURRENT_QUERY_ID.get();
     }
 
-    /**
-     * Returns {@code true} if the current thread is inside a forced capture context.
-     * Checked by {@link SamplingFilter} to bypass sampling rules unconditionally.
-     */
+    /** Returns {@code true} if the current thread is inside a forced capture context. */
     public static boolean isForced() {
         return Boolean.TRUE.equals(FORCE_CAPTURE.get());
     }
 
     /**
-     * Removes the {@code queryId} from the current thread's {@link ThreadLocal}.
-     * Only clears the forced flag if this context was the one that set it.
+     * Clears the current thread's {@code queryId}, and the forced flag only if this
+     * context set it.
      */
     @Override
     public void close() {

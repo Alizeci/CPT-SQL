@@ -5,7 +5,7 @@ plugins {
 }
 
 group = 'escuelaing.edu.co'
-version = '0.0.1-SNAPSHOT'
+version = '1.0.0'
 description = 'CPT-SQL: Continuous Performance Testing for SQL queries across the software development lifecycle.'
 
 subprojects {
@@ -32,7 +32,7 @@ subprojects {
                 from components.java
                 groupId    = 'escuelaing.edu.co'
                 artifactId = project.name
-                version    = '0.0.1-SNAPSHOT'
+                version    = '1.0.0'
             }
         }
         repositories {

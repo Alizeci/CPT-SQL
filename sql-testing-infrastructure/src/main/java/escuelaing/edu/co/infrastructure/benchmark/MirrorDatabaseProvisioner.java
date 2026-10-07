@@ -16,16 +16,18 @@ import java.util.List;
 import java.util.logging.Logger;
 
 /**
- * Provisions the mirror database used by the Phase 3 benchmark engine.
+ * Provisions the mirror database on which the load is replayed for each pull request.
  *
- * <p>Responsibilities: start the PostgreSQL Docker container if not running,
- * wait for it to accept connections, and apply the user's DDL script to create
- * the schema. Exposes an open {@link Connection} to other Phase 3 components.</p>
+ * <p>Starts the Docker container described by the active {@link DatabaseDialect} if it is not
+ * running (removing a stopped container with the same name first), waits up to 30 s for it to
+ * accept connections, and applies the application's DDL script. Other components obtain
+ * connections through {@link #openConnection()}.</p>
  *
- * <p>{@code loadtest.mirror.schema.script} must point to the application's DDL
- * file (tables, views, indexes). If missing, provisioning fails explicitly —
- * no default schema is assumed.</p>
+ * <p>{@code loadtest.mirror.schema.script} must point to the application's DDL file (tables,
+ * views, indexes). If it is not set, {@link #provision()} throws
+ * {@link IllegalStateException}; no default schema is assumed.</p>
  *
+ * <p>Properties and their defaults:</p>
  * <pre>
  * loadtest.mirror.host=localhost
  * loadtest.mirror.port=5433
@@ -33,7 +35,7 @@ import java.util.logging.Logger;
  * loadtest.mirror.user=mirror
  * loadtest.mirror.password=mirror
  * loadtest.mirror.container=cpt-sql-mirror
- * loadtest.mirror.schema.script=path/to/schema.sql
+ * loadtest.mirror.schema.script=path/to/schema.sql   (required, no default)
  * </pre>
  */
 @Component
@@ -71,8 +73,12 @@ public class MirrorDatabaseProvisioner {
     // Public API
 
     /**
-     * Ensures the mirror database is running and its schema is applied.
-     * Call this before starting the benchmark.
+     * Ensures the mirror database is running and its schema is applied. Call before generating
+     * data or replaying the load.
+     *
+     * @throws IllegalStateException if {@code loadtest.mirror.schema.script} is not configured
+     * @throws RuntimeException if the container cannot be started, the database does not respond
+     *         within 30 s, or the script cannot be read
      */
     public void provision() {
         ensureContainerRunning();
@@ -84,6 +90,7 @@ public class MirrorDatabaseProvisioner {
         }
     }
 
+    /** Opens a new connection to the mirror database; the caller must close it. */
     public Connection openConnection() throws SQLException {
         return DriverManager.getConnection(jdbcUrl(), user, password);
     }
@@ -206,8 +213,11 @@ public class MirrorDatabaseProvisioner {
     /**
      * Executes a DDL script against the mirror database.
      *
-     * <p>Statements are split on {@code ;} and executed independently so that
-     * a single failure (e.g. "already exists") does not abort the rest of the schema.</p>
+     * <p>Statements are split on {@code ;} and executed independently so that a single failure
+     * does not abort the rest of the schema; failed statements are skipped, and logged unless
+     * the error is "already exists"/"duplicate" (re-provisioning an existing schema). Lines
+     * starting with {@code --} are dropped. The naive split does not support statements that
+     * contain {@code ;} themselves (e.g. function bodies).</p>
      */
     private void executeScript(Connection conn, String scriptPath) throws SQLException {
         LOG.info("[MirrorDB] Applying DDL script: " + scriptPath);

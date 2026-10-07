@@ -17,13 +17,14 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.logging.Logger;
 
 /**
- * Orchestrates production capture windows: enables {@link CaptureToggle},
- * waits for the configured duration, then builds and persists
- * {@code load-profile.json} via {@link LoadProfileBuilder}.
+ * Runs capture windows in the capture environment: enables {@link CaptureToggle} for the
+ * configured duration, then builds the load profile with {@link LoadProfileBuilder} and
+ * writes it as JSON to {@code outputPath}.
  *
- * <p>Triggered automatically by a nightly cron or on demand via
- * {@code POST /loadtest/phase2/run}. Concurrent executions are prevented
- * with an {@link AtomicBoolean} guard.</p>
+ * <p>Triggered by a cron schedule (default 02:00 daily, server time zone) or on demand via
+ * {@code POST /loadtest/phase2/run?windowSecs=}. An {@link AtomicBoolean} guard prevents
+ * overlapping capture windows. The profile is written only if at least one query was
+ * captured.</p>
  *
  * <h3>Configuration (application.properties)</h3>
  * <pre>
@@ -57,14 +58,16 @@ public class CaptureWindowOrchestrator {
         this.mapper         = mapper;
     }
 
-    // Scheduled trigger — nightly cron (configurable)
     @Scheduled(cron = "${loadtest.phase2.cron:0 0 2 * * *}")
     public void runScheduled() {
         LOG.info("[CaptureWindowOrchestrator] Scheduled trigger (cron 2 AM UTC).");
         executeCaptureWindow(captureWindowSecs);
     }
 
-    // Manual trigger — POST /loadtest/phase2/run
+    /**
+     * Manual trigger: {@code POST /loadtest/phase2/run}. Runs the window on a daemon thread;
+     * {@code windowSecs <= 0} uses the configured duration.
+     */
     @RestController
     @RequestMapping("/loadtest/phase2")
     public class Controller {
@@ -87,11 +90,10 @@ public class CaptureWindowOrchestrator {
         }
     }
 
-    // Capture logic
-
     /**
-     * Opens a capture window for {@code windowSecs} seconds, then builds and
-     * persists the load profile. Restores the previous toggle state on exit.
+     * Enables capture for {@code windowSecs} seconds, restores the previous toggle state,
+     * then builds and persists the load profile. Returns immediately if a window is already
+     * running; an interrupt ends the window early but the profile is still built.
      */
     void executeCaptureWindow(int windowSecs) {
         if (!running.compareAndSet(false, true)) {

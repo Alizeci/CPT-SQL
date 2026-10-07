@@ -20,7 +20,7 @@ public interface DatabaseDialect {
     /** Internal container port for the engine. */
     int getContainerPort();
 
-    /** Environment variables for docker run. */
+    /** Environment variables passed to {@code docker run} to create the database and user. */
     Map<String, String> getDockerEnv(String db, String user, String password);
 
     /** Engine-specific JDBC URL. */
@@ -30,9 +30,12 @@ public interface DatabaseDialect {
     String getHealthCheckQuery();
 
     /**
-     * Engine-specific bulk insert.
-     * PostgreSQL: COPY FROM STDIN. MySQL: LOAD DATA LOCAL INFILE.
-     * @return number of rows inserted.
+     * Engine-specific bulk insert (PostgreSQL: {@code COPY FROM STDIN}; MySQL:
+     * {@code LOAD DATA LOCAL INFILE}).
+     *
+     * @param columns target columns, in the same order as the CSV fields
+     * @param csvData comma-separated rows without a header line
+     * @return number of rows inserted
      */
     long bulkInsert(Connection conn, String table, List<String> columns, String csvData) throws Exception;
 

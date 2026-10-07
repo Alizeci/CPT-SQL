@@ -25,14 +25,19 @@ import java.util.Map;
 import java.util.logging.Logger;
 
 /**
- * Validates synthetic data fidelity across two conceptual layers:
+ * Fidelity validation: reports how close the mirror database is to production, in two
+ * parts:
  *
  * <ul>
- *   <li><b>Data Quality (Layer A)</b> — algorithmic DPSDG guarantee: DP-budget metadata and
- *       byte-identical reproducibility. Always evaluated.</li>
- *   <li><b>Mirror Accuracy (Layer B)</b> — empirical latency and cardinality comparison.
- *       Skipped ({@code applicable=false}) for nightly runs (testProfile="normal").</li>
+ *   <li><b>Data quality</b> — privacy-budget metadata of the differentially private release
+ *       and byte-identical reproducibility of the generated data. Always evaluated.</li>
+ *   <li><b>Mirror accuracy</b> — empirical latency and cardinality comparison against the
+ *       production statistics in the load profile. Skipped ({@code applicable=false})
+ *       when the caller says so; the gate does this for the "normal" test profile.</li>
  * </ul>
+ *
+ * <p>The overall status is PASS when data quality is {@code REPRODUCIBLE} and mirror
+ * accuracy is PASS or not applicable. The gate only reports it and never blocks on it.</p>
  */
 @Component
 public class FidelityValidator {
@@ -40,15 +45,16 @@ public class FidelityValidator {
     private static final Logger LOG = Logger.getLogger(FidelityValidator.class.getName());
 
     /**
-     * Executions per query in {@link #validateLatencyFidelity}.
-     * N=50 ensures nearest-rank p95 is statistically stable (Hyndman & Fan 1996).
-     * N=5 produced p95 = max(5 values) = p100, which is methodologically indefensible.
-     * Configurable via {@code loadtest.fidelity.validationRuns} in application.properties.
+     * Executions per query in {@link #validateLatencyFidelity} (default 50). Enough runs for
+     * a stable nearest-rank p95; with very few runs p95 degenerates into the maximum.
      */
     @Value("${loadtest.fidelity.validationRuns:50}")
     private int validationRuns = 50;
 
-    /** Production p95 below which a query is excluded from the latency aggregate (default 10 ms). */
+    /**
+     * Production p95 (ms) below which a query is reported but excluded from the latency
+     * aggregate, since relative error is not meaningful at that scale (default 10).
+     */
     @Value("${loadtest.fidelity.latencyFloorMs:10}")
     private long latencyFloorMs = 10;
 
@@ -68,9 +74,12 @@ public class FidelityValidator {
     }
 
     /**
-     * Provisions the mirror database and evaluates both validation layers.
+     * Provisions and populates the mirror database and evaluates data quality and
+     * mirror accuracy.
      *
-     * @param applicable {@code false} when testProfile is "normal" (nightly) — mirror accuracy skipped
+     * @param applicable {@code false} to skip mirror accuracy (reported as {@code N/A})
+     * @return report with status PASS or FAIL; a FAIL is not thrown
+     * @throws RuntimeException if the mirror database cannot be opened or populated
      */
     public ValidationReport performValidation(LoadProfile profile, boolean applicable) {
         LOG.info("[FidelityValidator] Starting fidelity validation (mirrorAccuracy.applicable=" + applicable + ")...");
@@ -79,10 +88,10 @@ public class FidelityValidator {
         try (Connection conn = provisioner.openConnection()) {
             dataGenerator.populate(conn, profile);
 
-            // Layer B runs first on the initial populate (no extra populate needed)
+            // Mirror accuracy runs first, on the initial populate.
             MirrorAccuracy mirrorAccuracy = validateMirrorAccuracy(conn, profile, applicable);
 
-            // Layer A adds 2 more populates internally for CRC reproducibility
+            // Data quality populates twice more to compare checksums.
             DataQuality dataQuality = validateDataQuality(conn, profile);
 
             boolean dataOk   = "REPRODUCIBLE".equals(dataQuality.getStatus());
@@ -105,8 +114,9 @@ public class FidelityValidator {
     }
 
     /**
-     * Layer A — Data Quality: verifies byte-identical reproducibility and collects
-     * DPSDG privacy-budget metadata. Always evaluated regardless of test profile.
+     * Data quality: verifies byte-identical reproducibility and collects the privacy-budget
+     * metadata of the differentially private release (zeros for legacy profiles).
+     * Status is {@code REPRODUCIBLE} or {@code FAIL}.
      */
     public DataQuality validateDataQuality(Connection conn,
                                            LoadProfile profile) throws SQLException {
@@ -143,8 +153,10 @@ public class FidelityValidator {
     }
 
     /**
-     * Layer B — Mirror Accuracy: empirical latency and cardinality comparison.
-     * When {@code applicable=false}, returns immediately with {@code status="N/A"}.
+     * Mirror accuracy: empirical latency and cardinality comparison. PASS when at least
+     * 90 % of the non-excluded latency checks and 90 % of the cardinality checks pass
+     * (an empty set passes). When {@code applicable=false}, returns immediately with
+     * {@code status="N/A"}.
      */
     public MirrorAccuracy validateMirrorAccuracy(Connection conn,
                                                   LoadProfile profile,
@@ -164,10 +176,9 @@ public class FidelityValidator {
                     .build();
         }
 
-        // Symmetry with BenchmarkRunner: bind query parameters with values drawn from the
-        // production string pool sanitized during capture. Without this, randomString()
-        // returns synthetic strings that never match real category values, retrieving 0 rows
-        // and reporting unrepresentative sub-millisecond latencies.
+        // Same parameter model as BenchmarkRunner. Without it, random strings never match
+        // the mirror's category values, queries return 0 rows and latencies are
+        // unrepresentatively low.
         queryExecutor.setStringPool(dataGenerator.buildStringPool(profile));
         queryExecutor.setParameterModel(dataGenerator.getLastNumericStats(),
                                         dataGenerator.getLastColumnPools());
@@ -208,13 +219,12 @@ public class FidelityValidator {
                 .build();
     }
 
-    // -------------------------------------------------------------------------
-    // Sub-validators (unchanged)
-    // -------------------------------------------------------------------------
+    // Sub-validators
 
     /**
-     * Validates that p95 on synthetic data differs by less than
-     * {@link SyntheticDataGenerator#LATENCY_ERROR_THRESHOLD_PCT} from the
+     * Runs each query with captured SQL {@code validationRuns} times and checks that its
+     * p95 on the mirror differs by less than
+     * {@link SyntheticDataGenerator#LATENCY_ERROR_THRESHOLD_PCT} (10 %) from the
      * production p95 recorded in the load profile.
      */
     public Map<String, LatencyFidelity> validateLatencyFidelity(Connection conn, LoadProfile profile) {
@@ -234,8 +244,7 @@ public class FidelityValidator {
 
             double errorPct = p95Real > 0 ? Math.abs(p95Syn - p95Real) * 100.0 / p95Real : 0.0;
             boolean pass    = errorPct < SyntheticDataGenerator.LATENCY_ERROR_THRESHOLD_PCT;
-            // Queries whose production p95 is below the floor are reported but excluded
-            // from the aggregate: relative error is not meaningful at sub-10 ms scale.
+            // Below the latency floor: reported but excluded from the aggregate.
             boolean excluded = p95Real < latencyFloorMs;
             results.put(qid, LatencyFidelity.builder()
                     .queryId(qid).p95RealMs(p95Real).p95SyntheticMs(p95Syn)
@@ -252,9 +261,11 @@ public class FidelityValidator {
      * Validates cardinality fidelity for write queries (INSERT/UPDATE/DELETE).
      *
      * <p>Compares rows affected in production ({@code avgRowCount} from the profile)
-     * with rows affected on the mirror database. SELECT queries ({@code avgRowCount == 0})
-     * are skipped. Each write is executed inside a savepoint and rolled back to
-     * preserve mirror state.</p>
+     * with rows affected on the mirror database; passes when the error is below
+     * {@link SyntheticDataGenerator#CARDINALITY_ERROR_THRESHOLD_PCT} (5 %). Queries with
+     * {@code avgRowCount == 0} (reads) are skipped. Each write is executed inside a
+     * savepoint and rolled back to preserve mirror state; a failed write counts as
+     * 0 rows.</p>
      */
     public Map<String, CardinalityFidelity> validateCardinalityFidelity(Connection conn,
                                                                          LoadProfile profile) {
@@ -284,7 +295,8 @@ public class FidelityValidator {
 
     /**
      * Verifies that generating data with the same seed produces byte-identical
-     * results across two consecutive runs (CRC32 over table contents).
+     * results across two consecutive populates (per-table checksums XOR-combined; tables
+     * whose checksum fails are ignored). Leaves the mirror populated.
      */
     public ReproducibilityCheck validateReproducibility(Connection conn,
                                                          LoadProfile profile) throws SQLException {
@@ -307,9 +319,7 @@ public class FidelityValidator {
                 .byteIdentical(identical).pass(identical).build();
     }
 
-    // -------------------------------------------------------------------------
     // Helpers
-    // -------------------------------------------------------------------------
 
     private double passRate(List<Boolean> results) {
         if (results.isEmpty()) return 1.0;

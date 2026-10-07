@@ -6,12 +6,11 @@ import java.util.Map;
 import java.util.logging.Logger;
 
 /**
- * Merges captured SQL from a PR run into a production load profile.
+ * Merges the SQL captured from a PR run into the load profile from the capture environment.
  *
- * <p>The production profile's latency statistics (p95Ms, meanMs, callsPerMinute,
- * etc.) are preserved unchanged. Only {@code capturedSql} is updated per
- * {@code queryId} from the PR profile, allowing the benchmark to execute the
- * PR's query under real production load conditions.</p>
+ * <p>Only {@code capturedSql} is replaced per {@code queryId}; the latency statistics and
+ * the protected statistics of the base profile are kept, so the benchmark runs the PR's
+ * query under the captured load.</p>
  */
 public class LoadProfileMerger {
 
@@ -20,11 +19,12 @@ public class LoadProfileMerger {
     private LoadProfileMerger() {}
 
     /**
-     * Updates {@code capturedSql} in {@code base} with values from {@code pr},
-     * matched by {@code queryId}. All other fields in {@code base} are unchanged.
+     * Updates {@code capturedSql} in {@code base} in place with non-blank values from
+     * {@code pr}, matched by {@code queryId}. Queries present in only one profile are logged
+     * and skipped; all other fields of {@code base} are unchanged.
      *
-     * @param base production profile (stats source)
-     * @param pr   PR profile (SQL source)
+     * @param base load profile from the capture environment (statistics source; mutated)
+     * @param pr   profile captured from the PR run (SQL source)
      * @return number of queries whose capturedSql was updated
      */
     public static int merge(LoadProfile base, LoadProfile pr) {

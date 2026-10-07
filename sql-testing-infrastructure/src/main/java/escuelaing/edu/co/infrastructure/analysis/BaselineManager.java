@@ -17,10 +17,11 @@ import java.util.Map;
 import java.util.logging.Logger;
 
 /**
- * Manages the reference baseline for the benchmark engine (Phase 3).
+ * Reads and writes the baseline used by the gate.
  *
  * <p>The baseline is the set of {@link BenchmarkResult.QueryResult} metrics from the
- * last approved run, persisted in {@code baseline.json} at the project root.
+ * last approved run, persisted in {@code baseline.json} (path relative to the working
+ * directory) together with the conditions it was measured under.
  * {@link DegradationDetector} uses it to detect {@code BASELINE_EXCEEDED} and
  * {@code PLAN_CHANGED} degradations.</p>
  *
@@ -52,7 +53,7 @@ public class BaselineManager {
 
     /**
      * Reads the stored baseline and returns a {@code queryId → QueryResult} map.
-     * Returns an empty map if {@code baseline.json} does not yet exist (first run).
+     * Returns an empty map if {@code baseline.json} does not exist or cannot be read.
      *
      * @return immutable map with the current baseline
      */
@@ -78,11 +79,13 @@ public class BaselineManager {
      * Should only be called when the benchmark produces a PASS verdict.
      *
      * @param result approved result that becomes the new baseline
+     * @throws RuntimeException if the file cannot be written
      */
     public void save(BenchmarkResult result) {
         saveAs(result, baselinePath);
     }
 
+    /** Same as {@link #save} but writes to {@code path} instead of the configured location. */
     public void saveAs(BenchmarkResult result, String path) {
         BaselineFile baseline = new BaselineFile(
                 result.getCommitSha(),
@@ -109,7 +112,7 @@ public class BaselineManager {
             String commitSha,
             String profileName,
             String savedAt,
-            /** TestProfile used to measure the baseline (e.g. "light"). */
+            /** Test profile used to measure the baseline (e.g. "light"). */
             String testProfileName,
             /** Mirror rows per table used to measure the baseline. */
             long rowsPerTable,
@@ -119,11 +122,13 @@ public class BaselineManager {
 
     /**
      * Checks that the stored baseline was measured under the same conditions as
-     * {@code current}: same TestProfile, same mirror volume and same load-profile inputs.
+     * {@code current}: same test profile, same mirror volume and same load-profile inputs.
      * Comparing across conditions produces spurious or masked degradations (e.g. plan
      * cost changes caused by different synthetic data, not by the code under review).
+     * A baseline without this provenance metadata, or one that cannot be read, is
+     * incompatible.
      *
-     * @return {@code "MISSING"}, {@code "COMPARABLE"} or {@code "INCOMPATIBLE: <reason>"}
+     * @return {@code "MISSING"}, {@code "COMPARABLE"} or {@code "INCOMPATIBLE: <reasons>"}
      */
     public String compatibilityWith(BenchmarkResult current) {
         File file = new File(baselinePath);

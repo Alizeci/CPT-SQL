@@ -4,10 +4,16 @@ import lombok.Builder;
 import lombok.Data;
 
 /**
- * DPSDG parameters used during synthetic data generation, included in
- * {@link ValidationReport} for scientific auditability.
- * Budget composition: ε_total = ε_ft + ε_uii (sequential composition).
+ * Privacy parameters of mirror data generation, for auditability. Budget composition:
+ * {@code epsilonTotal = epsilonFt + epsilonUii} (sequential composition).
+ *
+ * <p>Not referenced by {@link ValidationReport}; {@link DataQuality} carries the privacy
+ * parameters actually reported.</p>
+ *
+ * @deprecated Unused. {@link DataQuality} reports the privacy parameters. Scheduled for
+ *             removal in a future release.
  */
+@Deprecated(forRemoval = true)
 @Data
 @Builder
 public class SyntheticDataInfo {

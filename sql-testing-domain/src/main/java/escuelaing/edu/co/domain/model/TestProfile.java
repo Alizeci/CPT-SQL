@@ -6,11 +6,9 @@ import lombok.Data;
 import java.util.List;
 
 /**
- * Execution profile for the benchmark engine (Phase 3).
- *
- * <p>Defines how load is applied: throughput target, phase sequence, think time,
- * and data access distribution. Use {@link #fromName(String)} to resolve a profile
- * from {@code loadtest.benchmark.testProfile} in application.properties.</p>
+ * Load profile replay settings for the benchmark engine: phase sequence, target rate,
+ * query mixture and data access distribution. Use {@link #fromName(String)} to resolve a
+ * predefined profile from {@code loadtest.benchmark.testProfile}.
  */
 @Data
 @Builder
@@ -19,20 +17,27 @@ public class TestProfile {
     private String name;
     private String description;
 
-    /** CLOSED_LOOP throttles to targetTps; OPEN_LOOP runs as fast as possible. */
+    /**
+     * Declared execution mode. Informational only: the benchmark engine always paces
+     * iterations to each phase's {@code targetTps}.
+     */
     private ExecutionMode executionMode;
 
-    /** UNIFORM gives equal probability to all IDs; ZIPF concentrates load on hot rows. */
+    /** How integer query parameters are drawn: UNIFORM over all IDs, or ZIPF (hot rows). */
     private AccessDistribution accessDistribution;
 
-    /** Zipf α parameter — only used when {@code accessDistribution == ZIPF}. Default: 1.0. */
+    /** Zipf exponent α, used only when {@code accessDistribution == ZIPF}. Default 1.0. */
     @Builder.Default
     private double zipfAlpha = 1.0;
 
-    /** Inter-transaction wait time in milliseconds (user think time simulation). */
+    /**
+     * Think time in milliseconds. Informational only: the benchmark engine derives the
+     * pause from {@code targetTps} and otherwise uses {@code loadtest.benchmark.thinkTimeMs}.
+     */
     @Builder.Default
     private long thinkTimeMs = 100;
 
+    /** Not read by the benchmark engine; measurement is controlled per {@link Phase}. */
     @Builder.Default
     private boolean measurement = true;
 
@@ -43,14 +48,23 @@ public class TestProfile {
 
     public enum AccessDistribution { UNIFORM, ZIPF }
 
+    /**
+     * Which load profile queries a phase executes. READ_HEAVY and WRITE_HEAVY fall back to
+     * all queries when the profile has none of the requested kind.
+     */
     public enum MixturePreset {
-        /** Default mix derived from the LoadProfile (~70 % reads / 30 % writes). */
+        /** Every query in the load profile. */
         DEFAULT,
+        /** Only {@code SELECT} queries. */
         READ_HEAVY,
+        /** Only non-{@code SELECT} queries. */
         WRITE_HEAVY
     }
 
-    /** STEP jumps to targetTps immediately; LINEAR ramps from the previous phase. */
+    /**
+     * STEP jumps to {@code targetTps} immediately; LINEAR ramps from the previous phase's
+     * target (0 for the first phase).
+     */
     public enum ThroughputFunction { STEP, LINEAR }
 
     /** A single execution phase within a TestProfile (target rate, mixture, duration). */
@@ -60,7 +74,10 @@ public class TestProfile {
 
         private String name;
 
-        /** Target throughput in operations per second. Ignored in OPEN_LOOP mode. */
+        /**
+         * Target rate in iterations per second; each iteration executes every selected query
+         * once and then pauses {@code 1000 / targetTps} ms.
+         */
         private int targetTps;
 
         private int durationSecs;
@@ -71,7 +88,7 @@ public class TestProfile {
         @Builder.Default
         private ThroughputFunction throughputFunction = ThroughputFunction.STEP;
 
-        /** If true, samples from this phase are included in the BenchmarkResult. */
+        /** If true, samples from this phase are included in the BenchmarkResult; false = warm-up. */
         @Builder.Default
         private boolean measurement = false;
     }
@@ -79,9 +96,8 @@ public class TestProfile {
     // Predefined Profiles
 
     /**
-     * Lightweight profile for per-commit pre-test (CI Level 1).
-     * 10 s warm-up to stabilise the PostgreSQL buffer cache, then 60 s measurement
-     * (raised from 30 s in v25 to roughly double the samples per query).
+     * Lightweight per-commit profile: 10 s warm-up to stabilise the PostgreSQL buffer cache,
+     * then 60 s measurement.
      */
     public static TestProfile light() {
         return TestProfile.builder()
@@ -111,7 +127,10 @@ public class TestProfile {
                 .build();
     }
 
-    /** Standard nightly profile (CI Level 2): linear ramp-up then 120 s sustained measurement. */
+    /**
+     * Standard nightly profile: linear ramp-up then 120 s sustained measurement. Mirror
+     * accuracy validation is skipped for this profile.
+     */
     public static TestProfile normal() {
         return TestProfile.builder()
                 .name("normal")
@@ -178,7 +197,7 @@ public class TestProfile {
                 .build();
     }
 
-    /** High sustained load: detects degradations that only appear under prolonged pressure. */
+    /** High sustained load: exposes degradations that only appear under prolonged pressure. */
     public static TestProfile sustained() {
         return TestProfile.builder()
                 .name("sustained")
@@ -252,7 +271,10 @@ public class TestProfile {
                 .build();
     }
 
-    /** Returns the predefined profile for the given name; defaults to {@link #normal()} if unknown. */
+    /**
+     * Returns the predefined profile for {@code name} (case-insensitive); unknown names
+     * resolve to {@link #normal()}. {@code name} must not be null.
+     */
     public static TestProfile fromName(String name) {
         return switch (name.toLowerCase()) {
             case "light"     -> light();

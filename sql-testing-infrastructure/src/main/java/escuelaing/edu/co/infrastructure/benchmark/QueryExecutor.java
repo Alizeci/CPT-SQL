@@ -22,14 +22,16 @@ import java.util.logging.Logger;
  * Executes a single SQL query against the mirror database and returns a
  * {@link TransactionRecord} with the measured latency and execution plan cost.
  *
- * <p>Responsibilities: resolve the SQL to run (captured SQL from Phase 2 takes
- * precedence), capture the planner cost via {@code EXPLAIN ANALYZE}, bind
- * synthetic parameters according to the access distribution, execute the
- * statement, and record the elapsed time.</p>
+ * <p>Responsibilities: resolve the SQL to run (explicit SQL, else the captured SQL from
+ * the load profile), bind synthetic parameters according to the access distribution,
+ * capture the plan via {@code EXPLAIN ANALYZE} (not included in the measured latency),
+ * execute the statement, and record the elapsed time.</p>
  *
- * <p>If no SQL is available for a query (neither captured nor provided), the
- * execution is skipped with a warning rather than falling back to a generic
+ * <p>If no SQL is available for a query, the execution is skipped with a warning and a
+ * record with empty SQL and 0 ms latency is returned, rather than running a generic
  * statement unrelated to the user's schema.</p>
+ *
+ * <p>Not thread-safe: the parameter generator and counters are shared mutable state.</p>
  */
 @Component
 public class QueryExecutor {
@@ -52,17 +54,18 @@ public class QueryExecutor {
     }
 
     /**
-     * Per-statement timeout on the mirror database (default 60 s).
+     * Per-statement timeout on the mirror database in ms (default 60 000; rounded up to
+     * whole seconds, minimum 1 s). Also applies to the {@code EXPLAIN ANALYZE} call.
      *
      * <p>A severely degraded query must produce a measurable result, not hang the job until
      * the CI timeout kills it and every measurement is lost. When the limit is reached the
-     * statement is cancelled and recorded with a latency equal to the limit, so it is
-     * reported as {@code P95_EXCEEDED} with its own diagnostic message.</p>
+     * statement is cancelled and recorded with a latency of at least the limit and a
+     * "severe degradation" warning, so it counts against p95 and SLA compliance.</p>
      */
     @org.springframework.beans.factory.annotation.Value("${loadtest.benchmark.statementTimeoutMs:60000}")
     private long statementTimeoutMs = 60_000;
 
-    /** Number of statements cancelled by the timeout in the current JVM (reported in the log). */
+    /** Number of statements cancelled by the timeout since this bean was created. */
     private long timedOutStatements = 0;
 
     public long getTimedOutStatements() { return timedOutStatements; }
@@ -78,22 +81,25 @@ public class QueryExecutor {
     /** String parameter pool populated from the load profile before the benchmark runs. */
     private List<String> stringPool = Collections.emptyList();
 
-    /** Sets the string parameter pool built from production sanitized data. */
+    /**
+     * Sets the fallback string pool (from the differentially private release, or from
+     * sanitized rows for legacy profiles); {@code null} clears it.
+     */
     public void setStringPool(List<String> pool) {
         this.stringPool = pool != null ? pool : Collections.emptyList();
     }
 
-    /** Numeric column model (col → [mean, std, lower, upper]) from the DP release. */
+    /** Numeric column model (col → [mean, std, lower, upper]) used to generate the mirror. */
     private Map<String, double[]> columnStats = Collections.emptyMap();
 
-    /** Categorical value pools per column from the DP release. */
+    /** Categorical value pools per column used to generate the mirror. */
     private Map<String, List<String>> columnPools = Collections.emptyMap();
 
     /**
-     * Sets the per-column parameter model derived from the DP release, so that
+     * Sets the per-column parameter model used to generate the mirror database, so that
      * parameters bound to a known column (e.g. {@code price BETWEEN ? AND ?},
-     * {@code category = ?}) follow the released distribution of that column instead
-     * of a generic uniform range. Columns without a model keep the previous behaviour.
+     * {@code category = ?}) follow that column's distribution instead of a generic
+     * range. Columns without a model get generic integers or strings from the pool.
      */
     public void setParameterModel(Map<String, double[]> stats, Map<String, List<String>> pools) {
         this.columnStats = stats != null ? stats : Collections.emptyMap();
@@ -115,6 +121,7 @@ public class QueryExecutor {
 
     // Public API
 
+    /** Same as the full overload with UNIFORM access distribution. */
     public TransactionRecord execute(Connection conn,
                                      String queryId,
                                      LoadProfile.QueryStats stats,
@@ -129,8 +136,12 @@ public class QueryExecutor {
      * <p>With {@link TestProfile.AccessDistribution#ZIPF}, integer parameters are
      * skewed toward lower IDs so hot records receive more traffic than cold ones.</p>
      *
-     * @param sql explicit SQL to run; if null, falls back to {@code stats.getCapturedSql()}
-     * @return record with measured latency and captured execution plan
+     * <p>SQL errors other than a timeout are logged and the record keeps the elapsed
+     * time; no exception is thrown.</p>
+     *
+     * @param sql explicit SQL to run; if null or blank, falls back to {@code stats.getCapturedSql()}
+     * @return record with measured latency (ms) and captured execution plan ({@code null}
+     *         if EXPLAIN failed)
      */
     public TransactionRecord execute(Connection conn,
                                      String queryId,
@@ -209,12 +220,14 @@ public class QueryExecutor {
      * Binds synthetic parameters to the prepared statement.
      *
      * <p>Each placeholder is first mapped to the column it is compared with
-     * ({@link #mapParametersToColumns}). When the DP release provides a model for that
-     * column, the value is drawn from it: numeric columns from N(mean, std) clamped to the
-     * declared bounds (for {@code BETWEEN ? AND ?} two values are drawn and ordered), string
-     * columns from the released histogram. Identifier columns and columns without a model
-     * fall back to the original behaviour: integers in [1, 500] (UNIFORM or ZIPF) and strings
-     * from the shared pool.</p>
+     * ({@link #mapParametersToColumns}). When a model exists for that column, the value is
+     * drawn from it: numeric columns from N(mean, std) clamped to the declared bounds (for
+     * {@code BETWEEN ? AND ?} two values are drawn and ordered; for {@code col = col + ?}
+     * an increment in [1, 5]), string columns from the column's value pool. Columns whose
+     * name ends in {@code id} skip the numeric model. Unmodelled parameters get integers in
+     * [1, 500] (UNIFORM or ZIPF) or strings from the shared pool.</p>
+     *
+     * <p>If the driver cannot report parameter metadata, nothing is bound.</p>
      */
     private List<Object> collectAndBind(PreparedStatement ps,
                                         String sql,
@@ -363,7 +376,7 @@ public class QueryExecutor {
      * Returns a Zipf-distributed integer in [1, n].
      *
      * <p>P(k) ∝ k^{-α}: lower values are selected more often, simulating hot-record access.
-     * Uses inverse CDF sampling — O(n) per call, acceptable for n≤1000.</p>
+     * Uses inverse CDF sampling — O(n) per call, acceptable for n ≤ 1000.</p>
      */
     private int zipfInt(int n, double alpha) {
         double sum = 0;
@@ -383,6 +396,7 @@ public class QueryExecutor {
 
     // EXPLAIN ANALYZE
 
+    /** Runs EXPLAIN ANALYZE with the same parameters; returns the plan text or {@code null}. */
     private String captureExplainPlan(Connection conn, String sql, List<Object> params) {
         try (PreparedStatement ps = conn.prepareStatement(adapter.buildExplainAnalyze(sql))) {
             ps.setQueryTimeout(timeoutSeconds());

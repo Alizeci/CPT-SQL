@@ -13,25 +13,31 @@ import java.util.TreeMap;
 import java.util.TreeSet;
 
 /**
- * Computes the {@link DpRelease} from the sanitized rows captured in Phase 2.
+ * Computes the differentially private release ({@link DpRelease}) of the sanitized rows the
+ * interceptor captured, and provides the Gaussian primitives reused by {@link TableProfiler}
+ * and {@link FkDegreeProfiler}.
+ *
+ * <p>In this row-level release the privacy unit is a captured row; a record read several
+ * times contributes several rows. {@link TableProfiler} gives record-level protection over
+ * whole tables and is used instead when available.</p>
  *
  * <h3>Numeric columns (Gaussian mechanism)</h3>
  * For each numeric column with declared bounds [L, U], values are clipped to [L, U] and two
  * statistics are released: the mean (L2 sensitivity (U−L)/n) and the second moment
- * (sensitivity (max(L²,U²) − min-square)/n), each with
- * σ = Δ·√(2·ln(1.25/δᵢ))/εᵢ (Dwork &amp; Roth 2014, Thm. A.1). The numeric budget ε_num and
- * δ are split evenly across the 2·k releases (sequential composition). The released
- * standard deviation is derived from the noisy moments (post-processing).
+ * (sensitivity (max(L²,U²) − min c² over [L, U])/n), each with
+ * σ = Δ·√(2·ln(1.25/δᵢ))/εᵢ (Dwork &amp; Roth 2014, Thm. A.1). ε_num is split evenly across
+ * the 2·k numeric releases; δ is split across all numeric and categorical releases
+ * (sequential composition). The released standard deviation is derived from the noisy
+ * moments (post-processing).
  *
  * <h3>Categorical columns (thresholded Gaussian histogram)</h3>
- * For each string column, value counts receive Gaussian noise with L2 sensitivity √2
- * (replacing one row moves one unit between two buckets). Buckets whose noisy count does
- * not exceed 1 + σ·√(2·ln(1/δᵢ)) are dropped, so rare values are not revealed. The
- * categorical budget ε_cat is split evenly across columns.
+ * For each column holding non-blank strings, value counts receive Gaussian noise with L2
+ * sensitivity √2 (replacing one row moves one unit between two buckets). Buckets whose noisy
+ * count does not exceed 1 + σ·√(2·ln(1/δᵢ)) are dropped, so rare values are not revealed.
+ * ε_cat is split evenly across columns.
  *
- * <p>Noise is drawn from {@link SecureRandom}: the release must not be reproducible from
- * a public seed. Reproducibility of the benchmark comes from the released statistics being
- * versioned, not from re-running the mechanism.</p>
+ * <p>Noise is drawn from {@link SecureRandom} so the release cannot be reproduced from a
+ * seed; benchmarks are reproducible because the released statistics are versioned.</p>
  */
 public final class DpReleaseBuilder {
 
@@ -52,7 +58,12 @@ public final class DpReleaseBuilder {
         this.noise  = noise;
     }
 
-    /** σ = Δ₂ · √(2 ln(1.25/δ)) / ε (valid for 0 &lt; ε &lt; 1). */
+    /**
+     * Gaussian-mechanism noise scale σ = Δ₂ · √(2 ln(1.25/δ)) / ε. The (ε, δ) guarantee holds
+     * for 0 &lt; ε &lt; 1 (Dwork &amp; Roth 2014, Thm. A.1); larger ε is accepted but not covered.
+     *
+     * @throws IllegalArgumentException if {@code epsilon <= 0} or {@code delta} is not in (0, 1)
+     */
     public static double gaussianSigma(double l2Sensitivity, double epsilon, double delta) {
         if (epsilon <= 0 || delta <= 0 || delta >= 1) {
             throw new IllegalArgumentException("Invalid (epsilon, delta)=(" + epsilon + ", " + delta + ")");
@@ -60,6 +71,12 @@ public final class DpReleaseBuilder {
         return l2Sensitivity * Math.sqrt(2.0 * Math.log(1.25 / delta)) / epsilon;
     }
 
+    /**
+     * Releases protected statistics of {@code rows} (column name to value; names are
+     * lower-cased). Numbers are treated as numeric, non-blank strings as categorical; other
+     * values are ignored. Numeric columns without declared bounds and categorical columns with
+     * no surviving bucket are listed as suppressed.
+     */
     public DpRelease build(List<Map<String, Object>> rows) {
         Map<String, List<Double>> numericValues = new TreeMap<>();
         Map<String, Map<String, Long>> stringCounts = new TreeMap<>();
@@ -150,7 +167,10 @@ public final class DpReleaseBuilder {
     /**
      * Gaussian release of a clipped mean and second moment from pre-aggregated sums
      * ({@code sum} and {@code sumSq} must already be computed over values clipped to
-     * {@code [lo, hi]}). Used for both row-level and table-level releases.
+     * {@code [lo, hi]}). {@code n} is treated as public. Used for both row-level and
+     * table-level releases. The noisy mean is clamped to {@code [lo, hi]} and the standard
+     * deviation to {@code (hi − lo)/2}; if the noisy variance is not positive, a fallback of
+     * {@code (hi − lo)/20} is released (post-processing, no extra budget).
      */
     DpRelease.NumericColumn releaseNumericMoments(long n, double sum, double sumSq,
                                                   double lo, double hi, double eps, double del) {

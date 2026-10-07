@@ -14,23 +14,22 @@ import java.util.concurrent.TimeUnit;
 import java.util.logging.Logger;
 
 /**
- * In-memory buffer for {@link TransactionRecord}s captured by the JDBC wrapper.
+ * Bounded in-memory buffer for the {@link TransactionRecord}s produced by
+ * {@link JdbcWrapper}. Thread-safe.
  *
- * <h3>Design</h3>
  * <ul>
- *   <li>Uses a {@link LinkedBlockingQueue} with a configurable maximum capacity
- *       to bound memory usage under load spikes.</li>
- *   <li>A dedicated flusher thread ({@code metrics-flusher}) drains the queue in
- *       batches every {@code loadtest.buffer.flushIntervalMs} ms, minimising
- *       contention with application threads.</li>
- *   <li>Both the incoming queue and the {@code flushed} accumulation list apply a
- *       drop-on-full policy: records are discarded (never block the caller) when
- *       either limit is reached.</li>
- *   <li>Flushed records accumulate until {@link LoadProfileBuilder} consumes them
- *       via {@link #drainFlushed()}.</li>
+ *   <li>Records enter a bounded {@link LinkedBlockingQueue}, so memory stays bounded under
+ *       load spikes.</li>
+ *   <li>A daemon thread ({@code metrics-flusher}) moves up to {@code batchSize} records
+ *       every {@code flushIntervalMs} ms into the {@code flushed} list, keeping contention
+ *       with application threads low.</li>
+ *   <li>Both the queue and the {@code flushed} list drop records when full (logged); the
+ *       caller is never blocked.</li>
+ *   <li>Flushed records accumulate until {@link LoadProfileBuilder} consumes them via
+ *       {@link #drainFlushed()}.</li>
  * </ul>
  *
- * <h3>Configuration (application.properties)</h3>
+ * <h3>Configuration (application.properties, defaults shown)</h3>
  * <pre>
  * loadtest.buffer.queueCapacity=10000
  * loadtest.buffer.flushedCapacity=50000
@@ -85,8 +84,6 @@ public class MetricsBuffer {
         LOG.info("[MetricsBuffer] Stopped. Total records in flushed: " + flushed.size());
     }
 
-    // Public API
-
     /**
      * Enqueues a {@link TransactionRecord}. Non-blocking: if the queue is full
      * the record is dropped and a warning is logged.
@@ -101,9 +98,9 @@ public class MetricsBuffer {
     }
 
     /**
-     * Immediately moves all records still in the queue into the {@code flushed} list,
-     * bypassing the flusher thread interval. Call this before {@link #drainFlushed()}
-     * to guarantee no records are lost due to the periodic flush lag.
+     * Immediately moves all queued records into the {@code flushed} list (subject to
+     * {@code flushedCapacity}). Call before {@link #drainFlushed()} so records still waiting
+     * for the flusher are included.
      */
     public void forceFlush() {
         List<TransactionRecord> batch = new ArrayList<>();
@@ -145,7 +142,7 @@ public class MetricsBuffer {
         return queue.size();
     }
 
-    /** Number of records already flushed and available to LoadProfileBuilder. */
+    /** Number of records already flushed and available to {@link LoadProfileBuilder}. */
     public int flushedCount() {
         return flushed.size();
     }

@@ -24,12 +24,13 @@ import java.util.List;
 import java.util.Set;
 
 /**
- * CPT-SQL Phase 1: extracts {@link SqlQuery} + {@link Req} contracts at compile time
- * and serializes them into {@code loadtest/queries.json}.
+ * Annotation processor that extracts {@link SqlQuery} + {@link Req} contracts at compile time
+ * and writes them to {@code loadtest/queries.json} in the class output.
  *
  * <p>Class-level {@code @Req} applies to all {@code @SqlQuery} methods in the class;
- * method-level {@code @Req} takes precedence. A duplicate {@code queryId} or a write
- * failure halt compilation with {@code ERROR}.</p>
+ * method-level {@code @Req} takes precedence. A duplicate or malformed {@code queryId}, a
+ * non-positive {@code maxResponseTimeMs} or a write failure fails compilation with
+ * {@code ERROR}; a missing {@code @Req} only produces a warning.</p>
  */
 @SupportedAnnotationTypes({
     "escuelaing.edu.co.processor.annotation.SqlQuery",
@@ -54,7 +55,7 @@ public class SqlQueryProcessor extends AbstractProcessor {
             TypeElement enclosingClass = (TypeElement) method.getEnclosingElement();
             SqlQuery sqlQuery = method.getAnnotation(SqlQuery.class);
 
-            // Duplicate queryId — ambiguous contract, halts compilation
+            // Duplicate queryId: ambiguous contract; the duplicate is skipped and compilation fails
             String queryId = sqlQuery.queryId();
             if (!seenQueryIds.add(queryId)) {
                 processingEnv.getMessager().printMessage(
@@ -83,7 +84,7 @@ public class SqlQueryProcessor extends AbstractProcessor {
             Req req = method.getAnnotation(Req.class);
             if (req == null) req = enclosingClass.getAnnotation(Req.class);
 
-            // maxResponseTimeMs must be positive — a zero or negative SLA is always violated.
+            // A zero or negative SLA would always be violated.
             if (req != null && req.maxResponseTimeMs() <= 0) {
                 processingEnv.getMessager().printMessage(
                     Diagnostic.Kind.ERROR,
@@ -96,7 +97,7 @@ public class SqlQueryProcessor extends AbstractProcessor {
                 );
             }
 
-            // Incomplete contract — detector will skip P95_EXCEEDED and SLO_PROXIMITY
+            // No contract: the detector skips P95_EXCEEDED and SLO_PROXIMITY for this query
             if (req == null) {
                 processingEnv.getMessager().printMessage(
                     Diagnostic.Kind.WARNING,

@@ -10,11 +10,10 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * Production load profile: statistical summary of queries captured during
- * an observation window.
- *
- * <p>Output of phase 2 and input to phase 3. Contains per-{@code queryId}
- * aggregated metrics needed to synthesise load on the mirror database.</p>
+ * Load profile ({@code load-profile.json}): per-{@code queryId} latency and frequency
+ * statistics recorded in the capture environment over an observation window, plus the
+ * differentially private release of the data. Produced by the capture environment and
+ * consumed to generate and load the mirror database.
  */
 @Data
 @Builder
@@ -27,9 +26,10 @@ public class LoadProfile {
     private Map<String, QueryStats> queries;
 
     /**
-     * Differentially-private release of the sanitized business columns.
-     * When present, it replaces {@code sanitizedRealData} as the only source of
-     * production-derived values for synthetic data generation.
+     * Differentially private release of the business columns and foreign-key concentration
+     * curves. When present, the mirror database is populated only from this release;
+     * when {@code null}, generation falls back to unprotected statistics computed from
+     * {@code sanitizedRealData}.
      */
     private DpRelease dpRelease;
 
@@ -41,6 +41,7 @@ public class LoadProfile {
 
         private String queryId;
         private long   sampleCount;
+        // Latency statistics in milliseconds; percentiles are nearest-rank.
         private double meanMs;
         private double medianMs;
         private double p95Ms;
@@ -48,12 +49,19 @@ public class LoadProfile {
         private long   minMs;
         private long   maxMs;
 
+        /** Call rate over the observation window. */
         private double callsPerMinute;
 
+        /** First non-blank SQL text seen for this query. */
         private String capturedSql;
 
+        /** Mean rows affected over executions that affected rows; {@code 0} for reads. */
         private double avgRowCount;
 
+        /**
+         * Raw sanitized rows; {@code null} unless explicitly retained for debugging. Not
+         * protected by the differentially private release.
+         */
         private List<Map<String, Object>> sanitizedRealData;
     }
 }

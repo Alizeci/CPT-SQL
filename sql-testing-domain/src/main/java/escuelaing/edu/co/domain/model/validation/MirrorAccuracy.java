@@ -6,28 +6,29 @@ import lombok.Data;
 import java.util.Map;
 
 /**
- * Empirical comparison of mirror-database latencies and cardinalities against
- * the production capture profile (Capa B).
+ * Empirical comparison of mirror database latencies and cardinalities against the load
+ * profile.
  *
- * <p>When {@code applicable=false} (nightly runs), the check is skipped by design:
- * nightly captures volume drift rather than mirror equivalence, so {@code status="N/A"}.</p>
+ * <p>{@code status} is "PASS" when at least 90 % of the non-excluded latency checks and at
+ * least 90 % of the cardinality checks pass. When {@code applicable=false} (nightly runs
+ * with {@code testProfile=normal}) the check is skipped by design, since those runs measure
+ * volume drift rather than mirror equivalence, and {@code status="N/A"}.</p>
  */
 @Data
 @Builder
 public class MirrorAccuracy {
 
-    /** {@code false} for nightly ({@code testProfile=normal}) — status will be "N/A". */
+    /** {@code false} for nightly runs ({@code testProfile=normal}); status is then "N/A". */
     private boolean applicable;
 
     /**
-     * Rows per table in the production capture database.
-     * Set to 0 when the value is unknown (e.g. pre-seed baseline).
+     * Rows per table in the capture database ({@code loadtest.capture.rowsPerTable});
+     * 0 when not configured.
      */
     private long captureRowsPerTable;
 
     /**
-     * Rows per table generated in the mirror database.
-     * Corresponds to {@code loadtest.synthetic.rowsPerTable}.
+     * Rows per table generated in the mirror database ({@code loadtest.synthetic.rowsPerTable}).
      */
     private long mirrorRowsPerTable;
 

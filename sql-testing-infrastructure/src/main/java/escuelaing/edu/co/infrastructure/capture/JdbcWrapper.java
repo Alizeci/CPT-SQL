@@ -16,16 +16,19 @@ import java.util.Set;
 import java.util.logging.Logger;
 
 /**
- * JDBC decorator that intercepts {@link PreparedStatement} execution to measure
- * latency and capture sanitized row data.
+ * Driver-level JDBC interceptor that records the SQL text and latency of instrumented
+ * {@link PreparedStatement} executions in the capture environment.
  *
- * <p>Wrap a real {@link Connection} with {@link #wrap(Connection)}; from that point,
- * every {@code prepareStatement} / {@code prepareCall} returns a proxy that measures
- * execution time, applies {@link SamplingFilter}, and enqueues a
- * {@link TransactionRecord} in {@link MetricsBuffer}.</p>
+ * <p>Wrap a real {@link Connection} with {@link #wrap(Connection)}; every
+ * {@code prepareStatement} / {@code prepareCall} then returns a {@link PreparedStatement}
+ * proxy. While {@link CaptureToggle} is on, each {@code execute*} call is timed and, if
+ * {@link SamplingFilter} accepts it, a {@link TransactionRecord} (query id, SQL, latency in
+ * ms, update count) is enqueued in {@link MetricsBuffer}. For queries, the first row read is
+ * passed through {@link SanitizationStrategy} and attached to the record.</p>
  *
- * <p>The active {@code queryId} is read from {@link CaptureContext#currentQueryId()}.
- * If no context is open, the call is passed through without instrumentation.</p>
+ * <p>The active {@code queryId} is read from {@link CaptureContext#currentQueryId()};
+ * without an open context nothing is recorded. Failed executions are still recorded when
+ * sampled; the original exception is then rethrown.</p>
  */
 @Component
 public class JdbcWrapper {
@@ -55,8 +58,6 @@ public class JdbcWrapper {
         this.sanitizationStrategy = sanitizationStrategy;
     }
 
-    // Public API
-
     /**
      * Wraps a real {@link Connection} with the capture decorator.
      *
@@ -70,8 +71,6 @@ public class JdbcWrapper {
                 new ConnectionHandler(real)
         );
     }
-
-    // Proxy handlers
 
     private class ConnectionHandler implements InvocationHandler {
 
@@ -117,8 +116,8 @@ public class JdbcWrapper {
             Instant start  = Instant.now();
             long startNano = System.nanoTime();
 
-            // Execute the query and capture SQL even on failure (e.g. statement_timeout).
-            // The captured SQL is required for phases 3+4 to benchmark the PR's query.
+            // Record even when execution fails (e.g. statement_timeout): the captured SQL is
+            // what the benchmark later runs against the mirror database.
             Throwable executionError = null;
             Object result = null;
             try {
@@ -162,9 +161,9 @@ public class JdbcWrapper {
     }
 
     /**
-     * Wraps a {@link ResultSet} to capture and sanitize the first row via
-     * {@link SanitizationStrategy} on the first successful {@code next()} call.
-     * The caller receives the cursor positioned normally and can read all columns.
+     * Wraps a {@link ResultSet} so the first row is sanitized via {@link SanitizationStrategy}
+     * on the first successful {@code next()}. The caller's cursor is unaffected; sanitization
+     * failures are logged and ignored.
      */
     private ResultSet wrapResultSetForCapture(ResultSet real, TransactionRecord record) {
         return (ResultSet) Proxy.newProxyInstance(

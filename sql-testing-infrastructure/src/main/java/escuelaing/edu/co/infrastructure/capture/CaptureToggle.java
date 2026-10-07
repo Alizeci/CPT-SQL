@@ -15,15 +15,15 @@ import org.springframework.web.bind.annotation.RestController;
 import java.util.Map;
 
 /**
- * Feature flag that enables or disables metric capture at runtime without redeployment.
+ * Runtime switch for JDBC metric capture in the capture environment; no redeployment needed.
  *
- * <p>Exposed via JMX (MBean {@code escuelaing.edu.co:type=CaptureToggle}) and a
- * built-in REST endpoint for control from CI/CD or dashboards. The flag is
- * {@code volatile} to ensure cross-thread visibility without explicit synchronization.</p>
+ * <p>Controlled via JMX (MBean {@code escuelaing.edu.co:type=CaptureToggle}) or REST
+ * ({@code GET /loadtest/capture}, {@code PUT /loadtest/capture?enabled=}). The flag is
+ * {@code volatile}, so changes are visible to all threads without locking.</p>
  *
- * <p>Defaults to {@code false} (capture off) to avoid unintended data accumulation
- * on startup. Set {@code loadtest.capture.enabledOnStartup=true} to pre-enable
- * capture before the first scheduled window.</p>
+ * <p>Off by default so nothing accumulates on startup; set
+ * {@code loadtest.capture.enabledOnStartup=true} to enable capture before the first
+ * scheduled window.</p>
  *
  * <h3>Configuration</h3>
  * <pre>
@@ -67,8 +67,7 @@ public class CaptureToggle {
         this.enabled = false;
     }
 
-    // REST control — GET /loadtest/capture, PUT /loadtest/capture?enabled=
-
+    /** REST control: {@code GET /loadtest/capture}, {@code PUT /loadtest/capture?enabled=}. */
     @RestController
     @RequestMapping("/loadtest/capture")
     public class Controller {

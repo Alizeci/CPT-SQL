@@ -19,19 +19,19 @@ import java.util.TreeSet;
 import java.util.logging.Logger;
 
 /**
- * Table-level differentially-private release of the business columns of the capture
- * database.
+ * Table-level differentially private release of the declared business columns of the
+ * capture database.
  *
  * <p>The row-level release ({@link DpReleaseBuilder#build}) only sees the rows the
- * application happens to read during the capture window. Those rows are biased towards
- * hot records (e.g. the simulator mostly reads products 1–500, all of one category),
- * so the mirror inherited that bias. This profiler computes the same statistics over
- * the <em>whole</em> tables instead:</p>
+ * application reads during the capture window, which are biased towards hot records. This
+ * profiler computes the same statistics over the <em>whole</em> tables of the
+ * {@code public} schema:</p>
  * <ul>
- *   <li><b>Numeric:</b> every column that has declared bounds ({@code CPT_DP_BOUNDS}) and a
- *       numeric type, in any table: Gaussian mechanism on the clipped mean and second moment
- *       (sensitivity {@code (hi−lo)/n} and {@code (max²−min²)/n}, {@code n} = table rows,
- *       treated as public).</li>
+ *   <li><b>Numeric:</b> every column of a numeric type whose name has declared bounds
+ *       ({@code CPT_DP_BOUNDS}), in any table: Gaussian mechanism on the clipped mean and
+ *       second moment (sensitivity {@code (hi−lo)/n} and {@code (max c² − min c²)/n} over
+ *       {@code [lo, hi]}; {@code n} = non-null values of the column, treated as
+ *       public).</li>
  *   <li><b>Categorical:</b> only the columns declared in {@code CPT_DP_CATEGORICAL}
  *       ({@code table.column}): thresholded Gaussian histogram (L2 sensitivity √2), so rare
  *       values are never published.</li>
@@ -39,7 +39,9 @@ import java.util.logging.Logger;
  *
  * <p>Neighbouring datasets differ in one row of one table (record-level DP). The budget
  * {@code ε_numeric} is split evenly across the {@code 2·k} numeric releases and
- * {@code ε_categorical} across the declared categorical columns; {@code δ} across all.</p>
+ * {@code ε_categorical} across the declared categorical columns; {@code δ} across all.
+ * Released columns are keyed by column name only; {@code sourceRows} is the largest
+ * {@code n} among numeric columns.</p>
  */
 public final class TableProfiler {
 
@@ -52,6 +54,7 @@ public final class TableProfiler {
 
     private TableProfiler() {}
 
+    /** Computes the table-level release over {@code conn} with {@link SecureRandom} noise. */
     public static DpRelease profile(Connection conn, DpConfig config) throws SQLException {
         return profile(conn, config, new SecureRandom());
     }

@@ -1,14 +1,14 @@
 CPT-SQL: Continuous Performance Testing for SQL Queries
-Copyright 2026 Laura Alejandra Izquierdo Castro
+Copyright 2026 Laura Alejandra Izquierdo Castro and Escuela Colombiana de Ingeniería Julio Garavito
 
-This product includes software developed as part of a Master's thesis in
+This product includes software developed as part of a Master's degree final project in
 Informatics at Escuela Colombiana de Ingeniería Julio Garavito (2026),
 under the supervision of Andrés Gómez Casanova.
 
 Academic reference:
   Izquierdo Castro, L. A. (2026). Diseño y desarrollo de un sistema de
   pruebas de carga continua para consultas SQL durante el ciclo de vida
-  del software [Trabajo de grado de maestría]. Escuela Colombiana de
+  del software [Master's degree final project]. Escuela Colombiana de
   Ingeniería Julio Garavito.
 
 --------------------------------------------------------------------------
@@ -46,11 +46,19 @@ This product includes software developed by the following projects:
 Algorithmic references
 --------------------------------------------------------------------------
 
-The synthetic data generator implements an adaptation of the DPSDG
-(Differentially-Private Synthetic Data Generation) algorithm described in:
+The synthetic data generator follows the approach of generating
+privacy-compliant, production-like synthetic data for testing described in:
 
-  Liu, X., et al. (2024). SynQB: Enabling Differentially-Private Synthetic
-  Data Generation for Query Benchmarking. Meta Platforms.
+  Liu, E., et al. (2024). Compute engine testing with privacy-compliant
+  production-like synthetic data. In Proc. VLDB 2024 Workshops:
+  International Workshop on Quality in Databases (QDB).
+
+The foreign-key concentration curves follow the private degree
+estimation of:
+
+  Hay, M., Li, C., Miklau, G., & Jensen, D. (2009). Accurate estimation
+  of the degree distribution of private networks. In Proc. Ninth IEEE
+  International Conference on Data Mining (ICDM), 169-178.
 
 The differential privacy foundations follow:
 

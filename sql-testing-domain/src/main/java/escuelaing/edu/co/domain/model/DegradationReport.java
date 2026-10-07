@@ -7,13 +7,12 @@ import java.time.Instant;
 import java.util.List;
 
 /**
- * Degradation report produced by {@code DegradationDetector} (Phase 3).
+ * Degradation report produced by {@code DegradationDetector}: which queries degraded,
+ * under which criterion, and the observed value versus the threshold.
  *
- * <p>Details which queries failed, the type of degradation detected, and the
- * observed values versus the reference thresholds.</p>
- *
- * <p>This is the decision artifact the CI/CD pipeline uses to block or approve
- * a merge.</p>
+ * <p>This is the artifact the gate uses to block or approve a merge: {@code P95_EXCEEDED},
+ * {@code SLO_PROXIMITY} and {@code PLAN_CHANGED} block; {@code BASELINE_EXCEEDED} is a
+ * warning only.</p>
  */
 @Data
 @Builder
@@ -22,13 +21,16 @@ public class DegradationReport {
     /** Timestamp at which the report was generated. */
     private Instant generatedAt;
 
-    /** Name of the load profile that produced this report. */
+    /** Run label of the evaluated benchmark ({@code loadtest.benchmark.profileName}). */
     private String profileName;
 
     /** SHA of the evaluated commit. */
     private String commitSha;
 
-    /** {@code true} if at least one degradation blocks the merge. */
+    /**
+     * {@code true} if {@code degradations} is non-empty, including non-blocking
+     * {@code BASELINE_EXCEEDED} warnings.
+     */
     private boolean hasDegradations;
 
     /** List of detected degradations (empty when {@code hasDegradations == false}). */
@@ -41,8 +43,6 @@ public class DegradationReport {
      */
     private String baselineStatus;
 
-    // -------------------------------------------------------------------------
-
     /** Type of detected degradation. */
     public enum DegradationType {
 
@@ -50,22 +50,25 @@ public class DegradationReport {
         P95_EXCEEDED,
 
         /**
-         * The execution plan changed and the query has {@code allowPlanChange = false}
-         * in {@code @Req}.
+         * The query has {@code allowPlanChange = false} in {@code @Req}, its plan cost exceeds
+         * the baseline cost by more than the tolerance (20 % by default), and its p95 uses at
+         * least 50 % of the SLA (by default). Below that SLA share the cost increase is reported
+         * as {@code BASELINE_EXCEEDED} instead. Blocking.
          */
         PLAN_CHANGED,
 
         /**
-         * Measured p95 exceeds the baseline p95 by more than the tolerance margin
-         * (10 % by default).
+         * Measured p95 exceeds the baseline p95 by more than the tolerance margin (10 % by
+         * default) and by at least 10 ms (by default); also used for plan cost increases
+         * below the {@code PLAN_CHANGED} SLA share. Warning only; dropped for queries that
+         * already have a blocking degradation.
          */
         BASELINE_EXCEEDED,
 
         /**
-         * Measured p95 exceeds the internal SLA proximity threshold (80 % by default).
-         * The query is in the risk zone: a normal environment fluctuation could cross
-         * the SLA in the next run. Blocks the merge even though the SLA has not yet
-         * been formally violated.
+         * Measured p95 is within the SLA but above the proximity threshold (80 % of the SLA
+         * by default): a normal environment fluctuation could cross the SLA in the next run.
+         * Blocking, even though the SLA has not been violated.
          */
         SLO_PROXIMITY
     }
@@ -84,19 +87,24 @@ public class DegradationReport {
         /**
          * Value observed during the benchmark.
          * <ul>
-         *   <li>{@link DegradationType#P95_EXCEEDED} → measured p95 in ms</li>
+         *   <li>{@link DegradationType#P95_EXCEEDED}, {@link DegradationType#SLO_PROXIMITY}
+         *       → measured p95 in ms</li>
          *   <li>{@link DegradationType#PLAN_CHANGED} → cost of the new plan</li>
-         *   <li>{@link DegradationType#BASELINE_EXCEEDED} → measured p95 in ms</li>
+         *   <li>{@link DegradationType#BASELINE_EXCEEDED} → measured p95 in ms, or the new plan
+         *       cost for a plan cost warning</li>
          * </ul>
          */
         private double observedValue;
 
         /**
-         * Threshold that was exceeded.
+ * Reference value for the criterion.
          * <ul>
          *   <li>{@link DegradationType#P95_EXCEEDED} → {@code maxResponseTimeMs} from {@code @Req}</li>
-         *   <li>{@link DegradationType#PLAN_CHANGED} → baseline plan cost</li>
-         *   <li>{@link DegradationType#BASELINE_EXCEEDED} → baseline p95 × 1.10</li>
+         *   <li>{@link DegradationType#SLO_PROXIMITY} → {@code maxResponseTimeMs} × proximity
+         *       fraction</li>
+         *   <li>{@link DegradationType#PLAN_CHANGED} → baseline plan cost × (1 + tolerance)</li>
+         *   <li>{@link DegradationType#BASELINE_EXCEEDED} → baseline p95 (not the tolerance-scaled
+         *       value), or the baseline plan cost for a plan cost warning</li>
          * </ul>
          */
         private double thresholdValue;

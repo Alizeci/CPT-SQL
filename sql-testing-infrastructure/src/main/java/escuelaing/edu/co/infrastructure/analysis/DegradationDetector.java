@@ -18,27 +18,32 @@ import java.util.logging.Logger;
  * against two reference sources:
  *
  * <ol>
- *   <li><b>{@code @Req} thresholds (Phase 1):</b> {@code maxResponseTimeMs} and
+ *   <li><b>{@code @Req} contracts:</b> {@code maxResponseTimeMs} and
  *       {@code allowPlanChange} declared in source code and loaded from
  *       {@code queries.json} via {@link QueryRegistryLoader}.</li>
- *   <li><b>Historical baseline:</b> p95 stored in {@code baseline.json} by
- *       {@link BaselineManager}. A degradation is flagged when the current p95
- *       exceeds the baseline by more than {@code baselineTolerancePct} (and by at least {@code baselineMinDeltaMs})
- *       (10 % by default).</li>
+ *   <li><b>Baseline:</b> per-query metrics stored in {@code baseline.json} by
+ *       {@link BaselineManager}. Used only when the baseline is {@code COMPARABLE}
+ *       (see {@link BaselineManager#compatibilityWith}); otherwise the relative
+ *       criteria are skipped.</li>
  * </ol>
  *
  * <p>Evaluation order per query:</p>
  * <ol>
  *   <li>{@code P95_EXCEEDED} — measured p95 &gt; {@code maxResponseTimeMs}.</li>
- *   <li>{@code SLO_PROXIMITY} — measured p95 is within the SLA but above the
- *       internal proximity threshold ({@code sloProximityPct}, default 80 %).</li>
- *   <li>{@code PLAN_CHANGED} — plan cost increased beyond tolerance
+ *   <li>{@code SLO_PROXIMITY} — measured p95 is within the SLA but above
+ *       {@code sloProximityPct} of it (default 80 %).</li>
+ *   <li>{@code PLAN_CHANGED} — only when {@code allowPlanChange=false}: plan cost
+ *       &gt; baseline cost × (1 + {@code planCostTolerancePct}) (default 20 %)
  *       <em>and</em> {@code slaRiskPct} &ge; {@code planChangeSlaRiskThresholdPct}
- *       (50 % by default). Below that threshold the plan change is downgraded to a
- *       {@code BASELINE_EXCEEDED} warning: the query is still well within its SLA
- *       budget, so the nightly benchmark should confirm the impact at scale.</li>
- *   <li>{@code BASELINE_EXCEEDED} — measured p95 &gt; baseline p95 × (1 + tolerance).</li>
+ *       (default 50 %). Below that threshold the plan change is reported as a
+ *       {@code BASELINE_EXCEEDED} warning instead.</li>
+ *   <li>{@code BASELINE_EXCEEDED} — measured p95 &gt; baseline p95 × (1 +
+ *       {@code baselineTolerancePct}) (default 10 %) and at least
+ *       {@code baselineMinDeltaMs} (default 10 ms) above it.</li>
  * </ol>
+ *
+ * <p>{@code BASELINE_EXCEEDED} warnings are dropped for queries that already have a
+ * blocking finding.</p>
  */
 @Component
 public class DegradationDetector {
@@ -51,7 +56,7 @@ public class DegradationDetector {
     /**
      * Minimum absolute p95 increase (ms) for {@code BASELINE_EXCEEDED}. Avoids flagging
      * millisecond-scale queries whose relative change is pure measurement noise
-     * (e.g. 2 ms → 6 ms on a single sample). Same rationale as the fidelity latency floor.
+     * (e.g. 2 ms → 6 ms on a single sample).
      */
     @Value("${loadtest.detector.baselineMinDeltaMs:10}")
     private double baselineMinDeltaMs = 10;
@@ -63,11 +68,10 @@ public class DegradationDetector {
     private double sloProximityPct;
 
     /**
-     * Minimum SLA risk percentage at which a plan cost increase becomes a blocking
-     * {@code PLAN_CHANGED}. Below this threshold the plan change is downgraded to a
-     * {@code BASELINE_EXCEEDED} warning: the query is still well within its SLA budget,
-     * so the nightly benchmark (higher volume) is the right place to confirm the impact.
-     * Default: 50 % — i.e., p95 must already consume at least half the SLA budget.
+     * Fraction of the SLA (p95 / {@code maxResponseTimeMs}) at which a plan cost increase
+     * becomes a blocking {@code PLAN_CHANGED}. Below it the change is only a
+     * {@code BASELINE_EXCEEDED} warning, since the query is still well within its SLA
+     * budget; the nightly run at higher volume confirms the impact. Default 0.50.
      */
     @Value("${loadtest.detector.planChangeSlaRiskThresholdPct:0.50}")
     private double planChangeSlaRiskThresholdPct;
@@ -90,13 +94,14 @@ public class DegradationDetector {
      * Evaluates {@code result} and produces a {@link DegradationReport}.
      *
      * @param result benchmark result to evaluate
-     * @return report with the list of detected degradations (may be empty)
+     * @return report with the detected degradations (may be empty) and the baseline status
+     *         ({@code COMPARABLE}, {@code MISSING} or {@code INCOMPATIBLE: <reason>})
      */
     public DegradationReport detect(BenchmarkResult result) {
         Map<String, QueryEntry> registry = queryRegistry.getRegistry();
-        // Invariant (TG §4.5.4): only compare against a baseline measured under the same
-        // TestProfile, mirror volume and load-profile inputs. Otherwise skip the
-        // baseline-relative criteria and evaluate the contract criteria only.
+        // Invariant: only compare against a baseline measured under the same test profile,
+        // mirror volume and load-profile inputs. Otherwise skip the baseline-relative
+        // criteria and evaluate the contract criteria only.
         String baselineStatus = baselineManager.compatibilityWith(result);
         Map<String, BenchmarkResult.QueryResult> baseline;
         if ("COMPARABLE".equals(baselineStatus)) {
@@ -125,8 +130,8 @@ public class DegradationDetector {
             checkBaselineExceeded(queryId, current, baseline.get(queryId), degradations);
         }
 
-        // Drop BASELINE_EXCEEDED for queries that already have a blocking degradation —
-        // the warning is redundant when P95_EXCEEDED or SLO_PROXIMITY is already present.
+        // Drop BASELINE_EXCEEDED for queries that already have a blocking degradation
+        // (P95_EXCEEDED, SLO_PROXIMITY or PLAN_CHANGED): the warning is redundant.
         java.util.Set<String> blockedQueries = degradations.stream()
                 .filter(r -> r.getType() != DegradationReport.DegradationType.BASELINE_EXCEEDED)
                 .map(DegradationReport.Degradation::getQueryId)
@@ -185,8 +190,7 @@ public class DegradationDetector {
 
         double slaRiskPct   = current.getSlaRiskPct();
         double thresholdPct = planChangeSlaRiskThresholdPct * 100;
-        // Actual relative increase of the estimated cost (reported in the message;
-        // previously the message printed the tolerance instead of the observed delta).
+        // Observed relative cost increase, reported in the message.
         int costIncreasePct = (int) Math.round((current.getPlanCost() / baseCost - 1.0) * 100);
 
         String baselineNode = adapter.parsePlanRootNode(baselineResult.getExecutionPlanText());
@@ -195,8 +199,7 @@ public class DegradationDetector {
                 && !baselineNode.equalsIgnoreCase(currentNode);
 
         if (slaRiskPct >= thresholdPct) {
-            // Plan changed AND the query already consumes a significant portion of its
-            // SLA budget — block the merge.
+            // The query already uses a significant part of its SLA budget: block.
             String description = nodeChanged
                     ? String.format(
                             "[%s] plan changed: '%s' → '%s' (cost %.2f → %.2f, +%d%%); " +
@@ -218,9 +221,8 @@ public class DegradationDetector {
                     .description(description)
                     .build());
         } else {
-            // Plan changed but the query is well within its SLA budget — warn only.
-            // The nightly benchmark at production volume will confirm whether the new
-            // plan actually degrades under real data scale.
+            // Well within the SLA budget: warn only; the nightly run at higher volume
+            // confirms whether the new plan degrades at scale.
             String description = nodeChanged
                     ? String.format(
                             "[%s] plan changed: '%s' → '%s' (cost %.2f → %.2f, +%d%%) — " +
