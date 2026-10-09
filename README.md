@@ -57,7 +57,7 @@ Relative criteria compare the pull request against a baseline measured on the sa
 
 - Java 17
 - Docker (the mirror runs in a PostgreSQL 17 container)
-- PostgreSQL for the capture environment. Only PostgreSQL 17 has been validated.
+- PostgreSQL for the capture environment. The reported runs used PostgreSQL 16.15 for capture and PostgreSQL 17 for the mirror, the only versions validated so far.
 - A self-hosted GitHub Actions runner with Docker, for the CI workflows
 
 ## Installation
