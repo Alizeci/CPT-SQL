@@ -18,7 +18,7 @@ flowchart LR
     P4 --> R3[FAIL: merge blocked]
 ```
 
-1. **Contract (build time).** The developer annotates each method that executes a SQL query. `@SqlQuery` assigns it an identifier and `@Req` declares its performance contract. An annotation processor extracts the contracts into `queries.json`. The annotations have source retention, so they add no runtime cost.
+1. **Contract (build time).** The developer annotates one method per SQL query, either the method that runs it or a method in a registry class, as the case study does. `@SqlQuery` assigns the query an identifier and `@Req` declares its performance contract. An annotation processor extracts the contracts into `queries.json`. The annotations have source retention, so they add no runtime cost.
 
    ```java
    @SqlQuery(queryId = "searchProductsByCategory",
@@ -26,13 +26,23 @@ flowchart LR
    @Req(maxResponseTimeMs = 300,
         priority = Req.Priority.HIGH,
         allowPlanChange = false,
-        description = "Backed by idx_products_category.")
-   public List<Product> searchByCategory(String category) { ... }
+        description = "Backed by idx_products_active_category.")
+   public void searchProductsByCategory(String category,
+           double minPrice, double maxPrice) {}
    ```
 
    `@Req` attributes and defaults: `maxResponseTimeMs` (1000), `priority` (`MEDIUM`), `allowPlanChange` (`true`; set it to `false` to enable plan-change detection) and `description`.
 
-2. **Capture (capture environment).** A driver-level interceptor records the SQL text and latency of each instrumented query. At the end of the capture, the same environment computes a small statistical summary of whole tables: means and dispersions of declared numeric columns, value frequencies of declared categorical columns, and, for each foreign key, a concentration curve of related records per parent. Every statistic is protected with the Gaussian mechanism of differential privacy. The output, `load-profile.json`, contains no production record or identifier.
+2. **Capture (capture environment).** A driver-level interceptor (`JdbcWrapper`) records the SQL text and latency of each instrumented query. To link an execution to its contract, the application runs the query inside a `CaptureContext` opened with the same identifier declared in `@SqlQuery`. Executions outside a `CaptureContext` are not recorded.
+
+   ```java
+   try (CaptureContext ignored = CaptureContext.begin("searchProductsByCategory");
+        PreparedStatement ps = conn.prepareStatement(SQL)) {
+       ...
+   }
+   ```
+
+   At the end of the capture, the same environment computes a small statistical summary of whole tables: means and dispersions of declared numeric columns, value frequencies of declared categorical columns, and, for each foreign key, a concentration curve of related records per parent. Every statistic is protected with the Gaussian mechanism of differential privacy. The output, `load-profile.json`, contains no production record or identifier.
 3. **Benchmark (every pull request).** The engine provisions an isolated PostgreSQL mirror in Docker, generates synthetic data from the summary with a fixed seed, replays the captured load, and collects each query's latency distribution and estimated plan cost.
 4. **Detection (every pull request).** The detector evaluates four criteria. Blocking findings return a non-zero exit code that stops the merge.
 
